@@ -1,0 +1,8 @@
+﻿.venv/
+__pycache__/
+*.pyc
+.vscode/
+data/
+outputs/
+model_ouput/
+HEARTCYCLE_PIPELINE.md

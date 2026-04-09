@@ -1,0 +1,297 @@
+﻿from __future__ import annotations
+
+import json
+import math
+import os
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Dict, Tuple
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from torch import nn
+from torch.utils.data import DataLoader, Dataset
+
+
+@dataclass
+class CNNRegressionConfig:
+    train_path: Path = Path('outputs/datasets/train.npz')
+    val_path: Path = Path('outputs/datasets/val.npz')
+    test_path: Path = Path('outputs/datasets/test.npz')
+    output_dir: Path = Path('model_ouput')
+    batch_size: int = 32
+    epochs: int = 50
+    learning_rate: float = 1e-3
+    weight_decay: float = 1e-4
+    dropout: float = 0.3
+    patience: int = 10
+    seed: int = 42
+
+
+def ensure_runtime_dirs(base_dir: Path) -> None:
+    runtime_dir = base_dir / '.runtime'
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault('TMP', str(runtime_dir))
+    os.environ.setdefault('TEMP', str(runtime_dir))
+    os.environ.setdefault('TORCHINDUCTOR_CACHE_DIR', str(runtime_dir / 'torchinductor'))
+
+
+def set_seed(seed: int) -> None:
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def load_npz(path: Path) -> Dict[str, np.ndarray]:
+    data = np.load(path, allow_pickle=True)
+    return {key: data[key] for key in data.files}
+
+
+class HeartbeatDataset(Dataset):
+    """Dataset wrapper that normalizes 1D segments using train statistics."""
+
+    def __init__(self, x: np.ndarray, y: np.ndarray, x_mean: np.ndarray, x_std: np.ndarray) -> None:
+        self.x = ((x.astype(np.float32) - x_mean) / x_std).astype(np.float32)
+        self.y = y.astype(np.float32)
+
+    def __len__(self) -> int:
+        return int(self.x.shape[0])
+
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        features = torch.from_numpy(self.x[index]).unsqueeze(0)
+        targets = torch.from_numpy(self.y[index])
+        return features, targets
+
+
+class CNNRegressor(nn.Module):
+    """1D CNN for two-target heartbeat regression: [PEP, AVC]."""
+
+    def __init__(self, dropout: float = 0.3) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv1d(1, 32, kernel_size=7, padding=3),
+            nn.BatchNorm1d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(kernel_size=2),
+            nn.Conv1d(32, 64, kernel_size=5, padding=2),
+            nn.BatchNorm1d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(kernel_size=2),
+            nn.Conv1d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(kernel_size=2),
+            nn.AdaptiveAvgPool1d(1),
+        )
+        self.regressor = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128, 128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(64, 2),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.regressor(self.features(x))
+
+
+class EarlyStopping:
+    """Stops training when validation loss stops improving."""
+
+    def __init__(self, patience: int) -> None:
+        self.patience = patience
+        self.best_loss = math.inf
+        self.counter = 0
+        self.should_stop = False
+
+    def step(self, loss: float) -> bool:
+        if loss < self.best_loss:
+            self.best_loss = loss
+            self.counter = 0
+            return True
+        self.counter += 1
+        if self.counter >= self.patience:
+            self.should_stop = True
+        return False
+
+
+def create_dataloaders(config: CNNRegressionConfig) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    train_data = load_npz(config.train_path)
+    val_data = load_npz(config.val_path)
+    test_data = load_npz(config.test_path)
+
+    x_mean = train_data['x'].mean(axis=0, keepdims=True).astype(np.float32)
+    x_std = train_data['x'].std(axis=0, keepdims=True).astype(np.float32) + 1e-6
+
+    train_dataset = HeartbeatDataset(train_data['x'], train_data['y'], x_mean, x_std)
+    val_dataset = HeartbeatDataset(val_data['x'], val_data['y'], x_mean, x_std)
+    test_dataset = HeartbeatDataset(test_data['x'], test_data['y'], x_mean, x_std)
+
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
+    return train_loader, val_loader, test_loader
+
+
+def run_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module, device: torch.device, optimizer: torch.optim.Optimizer | None = None) -> float:
+    is_training = optimizer is not None
+    model.train(is_training)
+
+    running_loss = 0.0
+    for inputs, targets in loader:
+        inputs = inputs.to(device)
+        targets = targets.to(device)
+
+        if is_training:
+            optimizer.zero_grad()
+
+        outputs = model(inputs)
+        loss = criterion(outputs, targets)
+
+        if is_training:
+            loss.backward()
+            optimizer.step()
+
+        running_loss += float(loss.item()) * inputs.size(0)
+
+    return running_loss / len(loader.dataset)
+
+
+def predict(model: nn.Module, loader: DataLoader, device: torch.device) -> Tuple[np.ndarray, np.ndarray]:
+    model.eval()
+    predictions = []
+    targets = []
+    with torch.no_grad():
+        for inputs, batch_targets in loader:
+            inputs = inputs.to(device)
+            outputs = model(inputs).cpu().numpy()
+            predictions.append(outputs)
+            targets.append(batch_targets.numpy())
+    return np.concatenate(predictions, axis=0), np.concatenate(targets, axis=0)
+
+
+def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    errors = y_pred - y_true
+    mae = np.mean(np.abs(errors), axis=0)
+    rmse = np.sqrt(np.mean(np.square(errors), axis=0))
+    return {
+        'pep_mae': float(mae[0]),
+        'avc_mae': float(mae[1]),
+        'pep_rmse': float(rmse[0]),
+        'avc_rmse': float(rmse[1]),
+        'mean_mae': float(mae.mean()),
+        'mean_rmse': float(rmse.mean()),
+    }
+
+
+def plot_loss_curves(history: Dict[str, list[float]], output_dir: Path) -> None:
+    plt.figure(figsize=(8, 5))
+    plt.plot(history['train_loss'], label='Train Loss')
+    plt.plot(history['val_loss'], label='Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('MSE Loss')
+    plt.title('Training vs Validation Loss')
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(output_dir / 'loss_curve.png', dpi=200)
+    plt.close()
+
+
+def plot_predictions(y_true: np.ndarray, y_pred: np.ndarray, output_dir: Path) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    target_names = ['PEP', 'AVC']
+    for index, axis in enumerate(axes):
+        axis.scatter(y_true[:, index], y_pred[:, index], alpha=0.6, s=18)
+        min_value = min(float(y_true[:, index].min()), float(y_pred[:, index].min()))
+        max_value = max(float(y_true[:, index].max()), float(y_pred[:, index].max()))
+        axis.plot([min_value, max_value], [min_value, max_value], 'r--', linewidth=1.5)
+        axis.set_title(f'{target_names[index]}: Predicted vs True')
+        axis.set_xlabel('True')
+        axis.set_ylabel('Predicted')
+        axis.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_dir / 'predicted_vs_true.png', dpi=200)
+    plt.close(fig)
+
+
+def plot_error_histogram(y_true: np.ndarray, y_pred: np.ndarray, output_dir: Path) -> None:
+    errors = y_pred - y_true
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    target_names = ['PEP Error', 'AVC Error']
+    for index, axis in enumerate(axes):
+        axis.hist(errors[:, index], bins=30, alpha=0.8, edgecolor='black')
+        axis.set_title(target_names[index])
+        axis.set_xlabel('Prediction Error')
+        axis.set_ylabel('Count')
+        axis.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_dir / 'error_histogram.png', dpi=200)
+    plt.close(fig)
+
+
+def save_report(config: CNNRegressionConfig, history: Dict[str, list[float]], metrics: Dict[str, float], output_dir: Path) -> None:
+    report = {
+        'config': {key: str(value) if isinstance(value, Path) else value for key, value in asdict(config).items()},
+        'history': history,
+        'test_metrics': metrics,
+    }
+    with (output_dir / 'report.json').open('w', encoding='utf-8') as handle:
+        json.dump(report, handle, indent=2)
+
+
+def train_cnn_regressor(config: CNNRegressionConfig) -> Dict[str, object]:
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_runtime_dirs(config.output_dir)
+    set_seed(config.seed)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    train_loader, val_loader, test_loader = create_dataloaders(config)
+
+    model = CNNRegressor(dropout=config.dropout).to(device)
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
+    early_stopping = EarlyStopping(patience=config.patience)
+
+    history = {'train_loss': [], 'val_loss': []}
+    best_model_path = config.output_dir / 'best_cnn_model.pt'
+
+    for epoch in range(1, config.epochs + 1):
+        train_loss = run_epoch(model, train_loader, criterion, device, optimizer=optimizer)
+        val_loss = run_epoch(model, val_loader, criterion, device, optimizer=None)
+
+        history['train_loss'].append(train_loss)
+        history['val_loss'].append(val_loss)
+
+        print(f'Epoch {epoch:02d}/{config.epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}')
+
+        improved = early_stopping.step(val_loss)
+        if improved:
+            torch.save(model.state_dict(), best_model_path)
+            print(f'  Saved best model to {best_model_path}')
+
+        if early_stopping.should_stop:
+            print(f'Early stopping triggered at epoch {epoch}.')
+            break
+
+    model.load_state_dict(torch.load(best_model_path, map_location=device))
+
+    y_pred, y_true = predict(model, test_loader, device)
+    metrics = compute_metrics(y_true, y_pred)
+
+    plot_loss_curves(history, config.output_dir)
+    plot_predictions(y_true, y_pred, config.output_dir)
+    plot_error_histogram(y_true, y_pred, config.output_dir)
+    save_report(config, history, metrics, config.output_dir)
+
+    return {
+        'metrics': metrics,
+        'history': history,
+        'best_model_path': str(best_model_path),
+        'output_dir': str(config.output_dir),
+    }
