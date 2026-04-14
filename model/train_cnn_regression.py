@@ -5,9 +5,9 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'model'))
+sys.path.insert(0, str(ROOT))
 
-from cnn_regression import CNNRegressionConfig, train_cnn_regressor
+from model.cnn_regression import CNNRegressionConfig, train_cnn_regressor
 
 
 def main() -> None:
@@ -15,7 +15,8 @@ def main() -> None:
     parser.add_argument('--train-path', type=Path, default=ROOT / 'outputs/datasets/train.npz')
     parser.add_argument('--val-path', type=Path, default=ROOT / 'outputs/datasets/val.npz')
     parser.add_argument('--test-path', type=Path, default=ROOT / 'outputs/datasets/test.npz')
-    parser.add_argument('--output-dir', type=Path, default=ROOT / 'model_ouput')
+    parser.add_argument('--runs-dir', type=Path, default=ROOT / 'outputs' / 'runs')
+    parser.add_argument('--plots-dir', type=Path, default=ROOT / 'outputs' / 'plots')
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--learning-rate', type=float, default=1e-3)
@@ -29,7 +30,8 @@ def main() -> None:
         train_path=args.train_path,
         val_path=args.val_path,
         test_path=args.test_path,
-        output_dir=args.output_dir,
+        runs_dir=args.runs_dir,
+        plots_dir=args.plots_dir,
         batch_size=args.batch_size,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
@@ -49,12 +51,13 @@ def main() -> None:
     print(f"Mean MAE: {metrics['mean_mae']:.4f}")
     print(f"Mean RMSE:{metrics['mean_rmse']:.4f}")
 
-    print(f"\nArtifacts saved in: {result['output_dir']}")
+    print(f"\nRun artifacts saved in: {result['runs_dir']}")
+    print(f"Plots saved in: {result['plots_dir']}")
     print(f"- Best model: {result['best_model_path']}")
-    print(f"- Loss curve: {Path(result['output_dir']) / 'loss_curve.png'}")
-    print(f"- Prediction plot: {Path(result['output_dir']) / 'predicted_vs_true.png'}")
-    print(f"- Error histogram: {Path(result['output_dir']) / 'error_histogram.png'}")
-    print(f"- Report: {Path(result['output_dir']) / 'report.json'}")
+    print(f"- Loss curve: {result['loss_curve_path']}")
+    print(f"- Prediction plot: {result['predictions_path']}")
+    print(f"- Error histogram: {result['error_histogram_path']}")
+    print(f"- Report: {result['report_path']}")
 
 
 if __name__ == '__main__':

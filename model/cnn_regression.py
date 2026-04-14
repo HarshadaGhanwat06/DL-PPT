@@ -19,7 +19,8 @@ class CNNRegressionConfig:
     train_path: Path = Path('outputs/datasets/train.npz')
     val_path: Path = Path('outputs/datasets/val.npz')
     test_path: Path = Path('outputs/datasets/test.npz')
-    output_dir: Path = Path('model_ouput')
+    runs_dir: Path = Path('outputs/runs')
+    plots_dir: Path = Path('outputs/plots')
     batch_size: int = 32
     epochs: int = 50
     learning_rate: float = 1e-3
@@ -189,7 +190,7 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     }
 
 
-def plot_loss_curves(history: Dict[str, list[float]], output_dir: Path) -> None:
+def plot_loss_curves(history: Dict[str, list[float]], output_path: Path) -> None:
     plt.figure(figsize=(8, 5))
     plt.plot(history['train_loss'], label='Train Loss')
     plt.plot(history['val_loss'], label='Validation Loss')
@@ -199,11 +200,11 @@ def plot_loss_curves(history: Dict[str, list[float]], output_dir: Path) -> None:
     plt.legend()
     plt.grid(alpha=0.3)
     plt.tight_layout()
-    plt.savefig(output_dir / 'loss_curve.png', dpi=200)
+    plt.savefig(output_path, dpi=200)
     plt.close()
 
 
-def plot_predictions(y_true: np.ndarray, y_pred: np.ndarray, output_dir: Path) -> None:
+def plot_predictions(y_true: np.ndarray, y_pred: np.ndarray, output_path: Path) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     target_names = ['PEP', 'AVC']
     for index, axis in enumerate(axes):
@@ -216,11 +217,11 @@ def plot_predictions(y_true: np.ndarray, y_pred: np.ndarray, output_dir: Path) -
         axis.set_ylabel('Predicted')
         axis.grid(alpha=0.3)
     fig.tight_layout()
-    fig.savefig(output_dir / 'predicted_vs_true.png', dpi=200)
+    fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
 
-def plot_error_histogram(y_true: np.ndarray, y_pred: np.ndarray, output_dir: Path) -> None:
+def plot_error_histogram(y_true: np.ndarray, y_pred: np.ndarray, output_path: Path) -> None:
     errors = y_pred - y_true
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     target_names = ['PEP Error', 'AVC Error']
@@ -231,23 +232,24 @@ def plot_error_histogram(y_true: np.ndarray, y_pred: np.ndarray, output_dir: Pat
         axis.set_ylabel('Count')
         axis.grid(alpha=0.3)
     fig.tight_layout()
-    fig.savefig(output_dir / 'error_histogram.png', dpi=200)
+    fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
 
-def save_report(config: CNNRegressionConfig, history: Dict[str, list[float]], metrics: Dict[str, float], output_dir: Path) -> None:
+def save_report(config: CNNRegressionConfig, history: Dict[str, list[float]], metrics: Dict[str, float], output_path: Path) -> None:
     report = {
         'config': {key: str(value) if isinstance(value, Path) else value for key, value in asdict(config).items()},
         'history': history,
         'test_metrics': metrics,
     }
-    with (output_dir / 'report.json').open('w', encoding='utf-8') as handle:
+    with output_path.open('w', encoding='utf-8') as handle:
         json.dump(report, handle, indent=2)
 
 
 def train_cnn_regressor(config: CNNRegressionConfig) -> Dict[str, object]:
-    config.output_dir.mkdir(parents=True, exist_ok=True)
-    ensure_runtime_dirs(config.output_dir)
+    config.runs_dir.mkdir(parents=True, exist_ok=True)
+    config.plots_dir.mkdir(parents=True, exist_ok=True)
+    ensure_runtime_dirs(config.runs_dir.parent)
     set_seed(config.seed)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -259,7 +261,11 @@ def train_cnn_regressor(config: CNNRegressionConfig) -> Dict[str, object]:
     early_stopping = EarlyStopping(patience=config.patience)
 
     history = {'train_loss': [], 'val_loss': []}
-    best_model_path = config.output_dir / 'best_cnn_model.pt'
+    best_model_path = config.runs_dir / 'standalone_cnn_best.pt'
+    report_path = config.runs_dir / 'standalone_cnn_report.json'
+    loss_curve_path = config.plots_dir / 'standalone_cnn_loss_curve.png'
+    predictions_path = config.plots_dir / 'standalone_cnn_predicted_vs_true.png'
+    error_histogram_path = config.plots_dir / 'standalone_cnn_error_histogram.png'
 
     for epoch in range(1, config.epochs + 1):
         train_loss = run_epoch(model, train_loader, criterion, device, optimizer=optimizer)
@@ -284,14 +290,19 @@ def train_cnn_regressor(config: CNNRegressionConfig) -> Dict[str, object]:
     y_pred, y_true = predict(model, test_loader, device)
     metrics = compute_metrics(y_true, y_pred)
 
-    plot_loss_curves(history, config.output_dir)
-    plot_predictions(y_true, y_pred, config.output_dir)
-    plot_error_histogram(y_true, y_pred, config.output_dir)
-    save_report(config, history, metrics, config.output_dir)
+    plot_loss_curves(history, loss_curve_path)
+    plot_predictions(y_true, y_pred, predictions_path)
+    plot_error_histogram(y_true, y_pred, error_histogram_path)
+    save_report(config, history, metrics, report_path)
 
     return {
         'metrics': metrics,
         'history': history,
         'best_model_path': str(best_model_path),
-        'output_dir': str(config.output_dir),
+        'report_path': str(report_path),
+        'plots_dir': str(config.plots_dir),
+        'runs_dir': str(config.runs_dir),
+        'loss_curve_path': str(loss_curve_path),
+        'predictions_path': str(predictions_path),
+        'error_histogram_path': str(error_histogram_path),
     }

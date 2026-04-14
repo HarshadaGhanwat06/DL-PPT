@@ -99,7 +99,10 @@ This is a separate CNN-only regression pipeline that also produces:
 - error histogram
 - saved CNN weights
 
-Its generated outputs are stored in `model_ouput/`.
+Its generated outputs are stored in:
+
+- `outputs/runs/` for `.pt` and `.json` artifacts
+- `outputs/plots/` for generated plots
 
 ## Repository Structure
 
@@ -109,7 +112,6 @@ DL-PPT/
 |-- outputs/
 |   `-- datasets/            # prepared train/val/test NPZ files
 |-- model/                   # standalone CNN regression experiment
-|-- model_ouput/             # standalone CNN plots + saved CNN model
 |-- scripts/
 |   |-- inspect_dataset.py   # inspect dataset structure and label quality
 |   |-- prepare_dataset.py   # create beat-level NPZ datasets
@@ -212,13 +214,16 @@ These reports contain:
 
 ### Standalone CNN outputs
 
-Saved under `model_ouput/`:
+Saved under `outputs/runs/`:
 
-- `best_cnn_model.pt`
-- `loss_curve.png`
-- `predicted_vs_true.png`
-- `error_histogram.png`
-- `report.json`
+- `standalone_cnn_best.pt`
+- `standalone_cnn_report.json`
+
+Saved under `outputs/plots/`:
+
+- `standalone_cnn_loss_curve.png`
+- `standalone_cnn_predicted_vs_true.png`
+- `standalone_cnn_error_histogram.png`
 
 ## Evaluation Metrics
 

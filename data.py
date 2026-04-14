@@ -245,21 +245,30 @@ def build_dataset(config: DatasetConfig) -> Dict[str, object]:
                 and config.min_lvet_ms <= lvet_value <= config.max_lvet_ms
             )
 
-            segment = _resample_segment(
+            segment_dzdt = _resample_segment(
                 signal=record["dzdt"],
                 time_s=record["time_s"],
                 start_s=float(rpeak_s - pre_r_s),
                 end_s=float(rpeak_s + post_r_s),
                 target_length=config.target_length,
             )
-            if segment is None:
+            segment_ecg = _resample_segment(
+                signal=record["ecg"],
+                time_s=record["time_s"],
+                start_s=float(rpeak_s - pre_r_s),
+                end_s=float(rpeak_s + post_r_s),
+                target_length=config.target_length,
+            )
+            if segment_dzdt is None or segment_ecg is None:
                 continue
 
-            segment = (segment - segment.mean()) / (segment.std() + 1e-6)
+            segment_dzdt = (segment_dzdt - segment_dzdt.mean()) / (segment_dzdt.std() + 1e-6)
+            segment_ecg = (segment_ecg - segment_ecg.mean()) / (segment_ecg.std() + 1e-6)
+            multi_channel = np.stack([segment_dzdt, segment_ecg], axis=0).astype(np.float32)
             target = np.array([pep_value, avc_offset_ms], dtype=np.float32)
-            baseline = _heuristic_event_offsets_ms(segment, relative_time_ms)
+            baseline = _heuristic_event_offsets_ms(segment_dzdt, relative_time_ms)
 
-            samples.append(segment)
+            samples.append(multi_channel)
             targets.append(target)
             baseline_preds.append(baseline)
             record_ids.append(f"{path.stem}::beat{beat_index:03d}")
@@ -294,6 +303,7 @@ def build_dataset(config: DatasetConfig) -> Dict[str, object]:
         split=split_array,
         relative_time_ms=relative_time_ms,
         target_names=np.asarray(["avo_ms", "avc_ms"]),
+        channel_names=np.asarray(["dzdt", "ecg"]),
     )
 
     for split_name in ("train", "val", "test"):
@@ -309,6 +319,7 @@ def build_dataset(config: DatasetConfig) -> Dict[str, object]:
             split=split_array[mask],
             relative_time_ms=relative_time_ms,
             target_names=np.asarray(["avo_ms", "avc_ms"]),
+            channel_names=np.asarray(["dzdt", "ecg"]),
         )
         summary[f"{split_name}_segments"] = int(mask.sum())
 
