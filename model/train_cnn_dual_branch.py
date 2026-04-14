@@ -19,6 +19,9 @@ sys.path.insert(0, str(ROOT))
 
 from model.cnn_dual_branch import DualBranchCNN
 
+W_PEP = 0.4
+W_AVC = 0.6
+
 
 @dataclass
 class DualBranchConfig:
@@ -90,10 +93,16 @@ def build_model() -> DualBranchCNN:
     return DualBranchCNN()
 
 
+def weighted_smooth_l1_loss(predictions: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, float, float]:
+    loss_pep = nn.functional.smooth_l1_loss(predictions[:, 0], targets[:, 0])
+    loss_avc = nn.functional.smooth_l1_loss(predictions[:, 1], targets[:, 1])
+    loss = W_PEP * loss_pep + W_AVC * loss_avc
+    return loss, float(loss_pep.item()), float(loss_avc.item())
+
+
 def train_one_epoch(
     model: nn.Module,
     loader: DataLoader,
-    criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
 ) -> float:
@@ -106,7 +115,7 @@ def train_one_epoch(
 
         optimizer.zero_grad()
         predictions = model(inputs)
-        loss = criterion(predictions, targets)
+        loss, _, _ = weighted_smooth_l1_loss(predictions, targets)
         loss.backward()
         optimizer.step()
 
@@ -169,20 +178,10 @@ def plot_results(
     plt.plot(history["train_loss"], linewidth=2)
     plt.xlabel("Epoch")
     plt.ylabel("SmoothL1 Loss")
-    plt.title("Dual-Branch CNN Training Loss")
+    plt.title("Dual-Branch Weighted CNN Training Loss")
     plt.grid(alpha=0.3)
     plt.tight_layout()
     plt.savefig(output_paths["loss_curve_path"], dpi=200)
-    plt.close()
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(history["val_mae_ms"], color="orange", linewidth=2)
-    plt.xlabel("Epoch")
-    plt.ylabel("Validation MAE (ms)")
-    plt.title("Dual-Branch CNN Validation MAE")
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(output_paths["val_mae_curve_path"], dpi=200)
     plt.close()
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -219,18 +218,16 @@ def plot_results(
 
 def ensure_output_paths_available(config: DualBranchConfig) -> Dict[str, Path]:
     output_paths = {
-        "best_model_path": config.runs_dir / "cnn_dual_best_model.pt",
-        "final_model_path": config.runs_dir / "cnn_dual_final_model.pt",
-        "report_path": config.runs_dir / "cnn_dual_report.json",
-        "loss_curve_path": config.plots_dir / "cnn_dual_loss_curve.png",
-        "val_mae_curve_path": config.plots_dir / "cnn_dual_val_mae_curve.png",
-        "predicted_vs_true_path": config.plots_dir / "cnn_dual_predicted_vs_true.png",
-        "error_histogram_path": config.plots_dir / "cnn_dual_error_histogram.png",
+        "best_model_path": config.runs_dir / "cnn_dual_weighted_best_model.pt",
+        "report_path": config.runs_dir / "cnn_dual_weighted_report.json",
+        "loss_curve_path": config.plots_dir / "cnn_dual_weighted_loss_curve.png",
+        "predicted_vs_true_path": config.plots_dir / "cnn_dual_weighted_predicted_vs_true.png",
+        "error_histogram_path": config.plots_dir / "cnn_dual_weighted_error_histogram.png",
     }
     existing = [str(path) for path in output_paths.values() if path.exists()]
     if existing:
         raise FileExistsError(
-            "Refusing to overwrite existing cnn_dual outputs:\n" + "\n".join(existing)
+            "Refusing to overwrite existing cnn_dual_weighted outputs:\n" + "\n".join(existing)
         )
     return output_paths
 
@@ -255,7 +252,6 @@ def train_and_evaluate(config: DualBranchConfig) -> Dict[str, object]:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model().to(device)
-    criterion = nn.SmoothL1Loss()
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=config.learning_rate,
@@ -274,15 +270,21 @@ def train_and_evaluate(config: DualBranchConfig) -> Dict[str, object]:
     history: Dict[str, list[float]] = {
         "train_loss": [],
         "val_mae_ms": [],
+        "val_pep_mae_ms": [],
+        "val_avc_mae_ms": [],
     }
 
     for epoch in range(1, config.epochs + 1):
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        train_loss = train_one_epoch(model, train_loader, optimizer, device)
         val_result = evaluate(model, val_loader, device, y_mean, y_std)
         val_mae = float(val_result["metrics"]["mean_mae_ms"])
+        val_pep_mae = float(val_result["metrics"]["pep_mae_ms"])
+        val_avc_mae = float(val_result["metrics"]["avc_mae_ms"])
 
         history["train_loss"].append(train_loss)
         history["val_mae_ms"].append(val_mae)
+        history["val_pep_mae_ms"].append(val_pep_mae)
+        history["val_avc_mae_ms"].append(val_avc_mae)
 
         if val_mae < best_val_mae:
             best_val_mae = val_mae
@@ -297,15 +299,15 @@ def train_and_evaluate(config: DualBranchConfig) -> Dict[str, object]:
         print(
             f"Epoch {epoch:02d}/{config.epochs} | "
             f"Train Loss: {train_loss:.4f} | "
-            f"Validation MAE: {val_mae:.4f} ms | "
+            f"Val MAE: {val_mae:.4f} ms | "
+            f"PEP MAE: {val_pep_mae:.4f} ms | "
+            f"AVC MAE: {val_avc_mae:.4f} ms | "
             f"Best MAE: {best_val_mae:.4f} ms"
         )
 
         if epochs_without_improvement >= config.patience:
             print(f"Early stopping triggered at epoch {epoch}.")
             break
-
-    torch.save(model.state_dict(), output_paths["final_model_path"])
 
     if best_state is None:
         raise RuntimeError("Training finished without producing a best model checkpoint.")
@@ -326,6 +328,8 @@ def train_and_evaluate(config: DualBranchConfig) -> Dict[str, object]:
                 "epoch": epoch_index + 1,
                 "train_loss": history["train_loss"][epoch_index],
                 "val_mae_ms": history["val_mae_ms"][epoch_index],
+                "val_pep_mae_ms": history["val_pep_mae_ms"][epoch_index],
+                "val_avc_mae_ms": history["val_avc_mae_ms"][epoch_index],
             }
             for epoch_index in range(len(history["train_loss"]))
         ],
@@ -334,9 +338,12 @@ def train_and_evaluate(config: DualBranchConfig) -> Dict[str, object]:
         "test_metrics": test_result["metrics"],
         "artifacts": {
             "best_model_path": str(output_paths["best_model_path"]),
-            "final_model_path": str(output_paths["final_model_path"]),
             "report_path": str(output_paths["report_path"]),
             **plot_paths,
+        },
+        "loss_weights": {
+            "pep": W_PEP,
+            "avc": W_AVC,
         },
     }
 
