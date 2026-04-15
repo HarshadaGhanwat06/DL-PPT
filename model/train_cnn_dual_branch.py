@@ -217,17 +217,19 @@ def plot_results(
 
 
 def ensure_output_paths_available(config: DualBranchConfig) -> Dict[str, Path]:
+    # Use a dedicated denoised prefix so experiments trained on the smoothed
+    # dataset do not overwrite the earlier weighted-loss run artifacts.
     output_paths = {
-        "best_model_path": config.runs_dir / "cnn_dual_weighted_best_model.pt",
-        "report_path": config.runs_dir / "cnn_dual_weighted_report.json",
-        "loss_curve_path": config.plots_dir / "cnn_dual_weighted_loss_curve.png",
-        "predicted_vs_true_path": config.plots_dir / "cnn_dual_weighted_predicted_vs_true.png",
-        "error_histogram_path": config.plots_dir / "cnn_dual_weighted_error_histogram.png",
+        "best_model_path": config.runs_dir / "cnn_dual_denoised_best_model.pt",
+        "report_path": config.runs_dir / "cnn_dual_denoised_report.json",
+        "loss_curve_path": config.plots_dir / "cnn_dual_denoised_loss_curve.png",
+        "predicted_vs_true_path": config.plots_dir / "cnn_dual_denoised_predicted_vs_true.png",
+        "error_histogram_path": config.plots_dir / "cnn_dual_denoised_error_histogram.png",
     }
     existing = [str(path) for path in output_paths.values() if path.exists()]
     if existing:
         raise FileExistsError(
-            "Refusing to overwrite existing cnn_dual_weighted outputs:\n" + "\n".join(existing)
+            "Refusing to overwrite existing cnn_dual_denoised outputs:\n" + "\n".join(existing)
         )
     return output_paths
 
