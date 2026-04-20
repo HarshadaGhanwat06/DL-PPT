@@ -115,10 +115,6 @@ class FinalHybridPredictor:
         with report_path.open("r", encoding="utf-8") as handle:
             report = json.load(handle)
         return float(report["target_mean_ms"][0]), float(report["target_std_ms"][0])
-        with report_path.open("r", encoding="utf-8") as handle:
-            report = json.load(handle)
-        pep_norm = report["pep_normalization"]
-        return float(pep_norm["mean"]), float(pep_norm["std"])
 
     def _load_xgb_model(self, model_path: Path):
         if XGBRegressor is None:

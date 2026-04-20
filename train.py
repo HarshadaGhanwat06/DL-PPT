@@ -7,8 +7,16 @@ from pathlib import Path
 from typing import Dict
 
 import numpy as np
+import torch.nn.functional as F
 
-from models import CNNLSTMRegressor, CNNRegressor, require_torch
+from models import (
+    CNNLSTMRegressor,
+    CNNRegressor,
+    ResNet1DRegressor,
+    TCNRegressor,
+    TransformerRegressor,
+    require_torch,
+)
 
 require_torch()
 import torch
@@ -27,6 +35,11 @@ class TrainingConfig:
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     patience: int = 5
+    # Physiological consistency loss weight (λ).
+    # At λ=0 this reduces to plain SmoothL1.
+    consistency_lambda: float = 0.1
+    # Data augmentation: set False to disable for ablation studies
+    augment: bool = True
 
 
 def _ensure_runtime_dirs(base_dir: Path) -> Path:
@@ -60,9 +73,105 @@ def _make_loader(
     target_mean: np.ndarray,
     target_std: np.ndarray,
 ) -> DataLoader:
-    x = torch.tensor(split_data["x"], dtype=torch.float32).unsqueeze(1)
+    # Use only the first channel (dzdt) as these models expect 1 channel
+    x_data = split_data["x"][:, 0, :] if split_data["x"].ndim == 3 else split_data["x"]
+    x = torch.tensor(x_data, dtype=torch.float32).unsqueeze(1)
     y = torch.tensor((split_data["y"] - target_mean) / target_std, dtype=torch.float32)
     return DataLoader(TensorDataset(x, y), batch_size=batch_size, shuffle=shuffle)
+
+
+def augment_batch(x: torch.Tensor) -> torch.Tensor:
+    """Apply randomised 1D signal augmentations during training only.
+
+    Four independent transforms are composed per batch:
+    1. Gaussian jitter  – additive noise (σ ≈ 2 % of signal std per sample)
+    2. Amplitude scale  – multiplicative factor in [0.9, 1.1]
+    3. Time warp        – random stretch/compress then resample to original length
+    4. R-peak offset    – circular roll by ±5 samples
+
+    All operations are differentiable where possible and stay on the same device
+    as the input tensor.
+    """
+    device = x.device
+    B, C, L = x.shape
+
+    # 1. Gaussian jitter: σ = 2% of each sample's std, clipped to a small range
+    signal_std = x.std(dim=-1, keepdim=True).clamp(min=1e-6)
+    noise = torch.randn_like(x) * (0.02 * signal_std)
+    x = x + noise
+
+    # 2. Amplitude scaling: per-sample scalar in [0.9, 1.1]
+    scale = (torch.rand(B, 1, 1, device=device) * 0.2 + 0.9)
+    x = x * scale
+
+    # 3. Time warping: stretch by factor in [0.95, 1.05], then resample to L
+    warp = (torch.rand(1, device=device) * 0.10 + 0.95).item()  # scalar
+    warped_len = max(1, int(round(L * warp)))
+    x = F.interpolate(x, size=warped_len, mode="linear", align_corners=False)
+    x = F.interpolate(x, size=L, mode="linear", align_corners=False)
+
+    # 4. R-peak offset: circular shift by a random integer in [-5, 5]
+    shift = int(torch.randint(-5, 6, (1,)).item())
+    if shift != 0:
+        x = torch.roll(x, shifts=shift, dims=-1)
+
+    return x
+
+
+class PhysiologicalConsistencyLoss(nn.Module):
+    """SmoothL1 loss augmented with a soft physiological constraint.
+
+    The constraint encodes two known relationships between the four cardiac
+    timing events (in normalised space):
+
+        LVET ≈ AVC − AVO
+        PEP  ≈ AVO
+
+    Because the dataset here contains only [AVO, AVC] (indices 0 and 1) as
+    training targets, the consistency term checks only the constraint that
+    AVC > AVO (AVC − AVO > 0), i.e. the valve closes after it opens.  When
+    targets include a third LVET column the full |LVET − (AVC − AVO)| penalty
+    is automatically activated.
+
+    Parameters
+    ----------
+    lambda_consistency:
+        Weight of the constraint term relative to the SmoothL1 term.
+        Typical range: 0.05–0.2.  Set to 0 to fall back to plain SmoothL1.
+    """
+
+    def __init__(self, lambda_consistency: float = 0.1) -> None:
+        super().__init__()
+        self.lambda_c = lambda_consistency
+        self.smooth_l1 = nn.SmoothL1Loss()
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        base_loss = self.smooth_l1(pred, target)
+        if self.lambda_c == 0.0:
+            return base_loss
+
+        consistency_terms = []
+
+        # Constraint: AVC prediction (index 1) must exceed AVO prediction (index 0)
+        # Penalise only when pred_AVC < pred_AVO (soft ReLU hinge)
+        if pred.shape[-1] >= 2:
+            diff_pred = pred[:, 1] - pred[:, 0]   # AVC − AVO
+            diff_true = target[:, 1] - target[:, 0]
+            # Both predictions and targets should satisfy AVC > AVO
+            consistency_terms.append(F.relu(-diff_pred).mean())
+            consistency_terms.append(F.mse_loss(diff_pred, diff_true))
+
+        # Constraint: LVET ≈ AVC − AVO when a third target column is present
+        if pred.shape[-1] >= 3:
+            lvet_pred = pred[:, 2]
+            lvet_implied = pred[:, 1] - pred[:, 0]
+            consistency_terms.append(F.smooth_l1_loss(lvet_pred, lvet_implied))
+
+        if not consistency_terms:
+            return base_loss
+
+        consistency_loss = torch.stack(consistency_terms).mean()
+        return base_loss + self.lambda_c * consistency_loss
 
 
 def _build_model(model_name: str, input_length: int):
@@ -70,6 +179,12 @@ def _build_model(model_name: str, input_length: int):
         return CNNRegressor(input_length=input_length)
     if model_name == "cnn_lstm":
         return CNNLSTMRegressor()
+    if model_name == "resnet":
+        return ResNet1DRegressor()
+    if model_name == "tcn":
+        return TCNRegressor()
+    if model_name == "transformer":
+        return TransformerRegressor()
     raise ValueError(f"Unsupported model_name={model_name!r}")
 
 
@@ -130,12 +245,29 @@ def train_model(config: TrainingConfig) -> Dict[str, object]:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = _build_model(config.model_name, input_length=train_data["x"].shape[1]).to(device)
+    
+    # EMA Model setup
+    ema_model = _build_model(config.model_name, input_length=train_data["x"].shape[1]).to(device)
+    ema_model.load_state_dict(model.state_dict())
+    ema_decay = 0.99
+    
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
-    criterion = nn.SmoothL1Loss()
+    
+    # Cosine LR schedule with warmup
+    steps_per_epoch = len(train_loader)
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=config.learning_rate,
+        epochs=config.epochs,
+        steps_per_epoch=steps_per_epoch,
+        pct_start=5.0 / config.epochs if config.epochs > 5 else 0.3, # ~5 epochs warmup
+    )
+    
+    criterion = PhysiologicalConsistencyLoss(lambda_consistency=config.consistency_lambda)
 
     best_state = None
     best_val_mae = float("inf")
@@ -148,15 +280,31 @@ def train_model(config: TrainingConfig) -> Dict[str, object]:
         for x_batch, y_batch in train_loader:
             x_batch = x_batch.to(device)
             y_batch = y_batch.to(device)
+            # Apply augmentation during training only
+            if config.augment:
+                x_batch = augment_batch(x_batch)
             optimizer.zero_grad()
             predictions = model(x_batch)
             loss = criterion(predictions, y_batch)
             loss.backward()
+            
+            # Gradient clipping at 1.0
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            
             optimizer.step()
+            scheduler.step()
+            
+            # EMA Update
+            with torch.no_grad():
+                for param, ema_param in zip(model.parameters(), ema_model.parameters()):
+                    ema_param.data.mul_(ema_decay).add_(param.data, alpha=1 - ema_decay)
+            
             running_loss += float(loss.item()) * x_batch.size(0)
 
         train_loss = running_loss / len(train_loader.dataset)
-        val_metrics = _evaluate_model(model, val_loader, device, target_mean=target_mean, target_std=target_std)
+        
+        # Evaluate using EMA weights
+        val_metrics = _evaluate_model(ema_model, val_loader, device, target_mean=target_mean, target_std=target_std)
         epoch_result = {
             "epoch": epoch,
             "train_loss": train_loss,
@@ -166,7 +314,7 @@ def train_model(config: TrainingConfig) -> Dict[str, object]:
 
         if val_metrics["mean_mae_ms"] < best_val_mae:
             best_val_mae = val_metrics["mean_mae_ms"]
-            best_state = {key: value.cpu() for key, value in model.state_dict().items()}
+            best_state = {key: value.cpu() for key, value in ema_model.state_dict().items()}
             patience_counter = 0
         else:
             patience_counter += 1
@@ -176,6 +324,7 @@ def train_model(config: TrainingConfig) -> Dict[str, object]:
     if best_state is not None:
         model.load_state_dict(best_state)
 
+    # Final evaluation uses the best EMA weights loaded into model
     train_metrics = _evaluate_model(model, train_loader, device, target_mean=target_mean, target_std=target_std)
     val_metrics = _evaluate_model(model, val_loader, device, target_mean=target_mean, target_std=target_std)
     test_metrics = _evaluate_model(model, test_loader, device, target_mean=target_mean, target_std=target_std)
