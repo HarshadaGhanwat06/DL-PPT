@@ -52,7 +52,7 @@ from torch.utils.data import DataLoader, TensorDataset
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from model.cnn_improved import ImprovedCNN
+from models import ResNet1DRegressor, TCNRegressor, TransformerRegressor, CNNLSTMRegressor, CNNRegressor
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +67,9 @@ def set_seed(seed: int) -> None:
 
 
 def make_loader(x: np.ndarray, y: np.ndarray, batch_size: int, shuffle: bool) -> DataLoader:
-    x_t = torch.from_numpy(x.astype(np.float32))
+    # Use only dzdt channel
+    x_data = x[:, 0, :] if x.ndim == 3 else x
+    x_t = torch.from_numpy(x_data.astype(np.float32)).unsqueeze(1)
     y_t = torch.from_numpy(y.astype(np.float32))
     return DataLoader(TensorDataset(x_t, y_t), batch_size=batch_size, shuffle=shuffle)
 
@@ -83,16 +85,66 @@ def normalize_targets(
 
 
 def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-    err = y_pred - y_true
-    mae = np.mean(np.abs(err), axis=0)
-    rmse = np.sqrt(np.mean(np.square(err), axis=0))
+    error = y_pred - y_true
+    
+    # 1. MAE
+    mae = np.mean(np.abs(error), axis=0)
+    
+    # 2. RMSE
+    rmse = np.sqrt(np.mean(np.square(error), axis=0))
+    
+    # 3. R² Score
+    ss_res = np.sum(error**2, axis=0)
+    ss_tot = np.sum((y_true - np.mean(y_true, axis=0))**2, axis=0)
+    r2 = 1 - (ss_res / (ss_tot + 1e-8))
+    
+    # 4. Median Absolute Error
+    medae = np.median(np.abs(error), axis=0)
+    
+    # 5. Max Error
+    max_err = np.max(np.abs(error), axis=0)
+    
+    # 6. Bias (Mean Error)
+    bias = np.mean(error, axis=0)
+    
+    # 7. Within ±10 ms Accuracy
+    acc_10 = np.mean(np.abs(error) <= 10.0, axis=0) * 100.0
+    
+    # 8. Within ±20 ms Accuracy
+    acc_20 = np.mean(np.abs(error) <= 20.0, axis=0) * 100.0
+
     return {
-        "pep_mae_ms": float(mae[0]),
+        "avo_mae_ms": float(mae[0]),
         "avc_mae_ms": float(mae[1]),
-        "pep_rmse_ms": float(rmse[0]),
-        "avc_rmse_ms": float(rmse[1]),
         "mean_mae_ms": float(mae.mean()),
+        
+        "avo_rmse_ms": float(rmse[0]),
+        "avc_rmse_ms": float(rmse[1]),
         "mean_rmse_ms": float(rmse.mean()),
+        
+        "avo_r2": float(r2[0]),
+        "avc_r2": float(r2[1]),
+        "mean_r2": float(r2.mean()),
+        
+        "avo_medae_ms": float(medae[0]),
+        "avc_medae_ms": float(medae[1]),
+        "mean_medae_ms": float(medae.mean()),
+        
+        "avo_max_err_ms": float(max_err[0]),
+        "avc_max_err_ms": float(max_err[1]),
+        "mean_max_err_ms": float(max_err.mean()),
+        
+        "avo_bias_ms": float(bias[0]),
+        "avc_bias_ms": float(bias[1]),
+        "mean_bias_ms": float(bias.mean()),
+        
+        "avo_acc_10ms_%": float(acc_10[0]),
+        "avc_acc_10ms_%": float(acc_10[1]),
+        "mean_acc_10ms_%": float(acc_10.mean()),
+        
+        "avo_acc_20ms_%": float(acc_20[0]),
+        "avc_acc_20ms_%": float(acc_20[1]),
+        "mean_acc_20ms_%": float(acc_20.mean()),
     }
 
 
@@ -175,17 +227,27 @@ def train_fold(
     y_mean: np.ndarray,
     y_std: np.ndarray,
     *,
+    model_name: str,
     epochs: int,
     patience: int,
     batch_size: int,
     lr: float,
     device: torch.device,
 ) -> Dict[str, float]:
-    """Train one ImprovedCNN fold and return test-set metrics (in ms)."""
+    """Train one fold and return test-set metrics (in ms)."""
     train_loader = make_loader(train_x, train_y_norm, batch_size, shuffle=True)
-    val_loader = make_loader(val_x, np.zeros_like(val_y), batch_size, shuffle=False)  # y not needed for inference
+    val_loader = make_loader(val_x, np.zeros_like(val_y), batch_size, shuffle=False)
 
-    model = ImprovedCNN(input_channels=2).to(device)
+    if model_name == "resnet":
+        model = ResNet1DRegressor().to(device)
+    elif model_name == "tcn":
+        model = TCNRegressor().to(device)
+    elif model_name == "transformer":
+        model = TransformerRegressor().to(device)
+    elif model_name == "cnn_lstm":
+        model = CNNLSTMRegressor().to(device)
+    else:
+        model = CNNRegressor(input_length=160).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
     criterion = nn.SmoothL1Loss()
@@ -240,6 +302,7 @@ def train_fold(
 def run_loso(
     subjects: Dict[str, Dict[str, np.ndarray]],
     *,
+    model_name: str,
     epochs: int,
     patience: int,
     batch_size: int,
@@ -276,13 +339,13 @@ def run_loso(
         )
         metrics = train_fold(
             train_x, train_y_norm, test_x, test_y, y_mean, y_std,
-            epochs=epochs, patience=patience, batch_size=batch_size,
-            lr=lr, device=device,
+            model_name=model_name, epochs=epochs, patience=patience, 
+            batch_size=batch_size, lr=lr, device=device,
         )
         metrics["test_subject"] = test_subj
         fold_results.append(metrics)
         print(
-            f"           PEP MAE={metrics['pep_mae_ms']:.2f} ms | "
+            f"           AVO MAE={metrics['avo_mae_ms']:.2f} ms | "
             f"AVC MAE={metrics['avc_mae_ms']:.2f} ms | "
             f"Mean MAE={metrics['mean_mae_ms']:.2f} ms"
         )
@@ -294,19 +357,44 @@ def run_loso(
 
     summary = {
         "n_subjects": n,
-        "pep_mae_ms": _agg("pep_mae_ms"),
+        "avo_mae_ms": _agg("avo_mae_ms"),
         "avc_mae_ms": _agg("avc_mae_ms"),
         "mean_mae_ms": _agg("mean_mae_ms"),
-        "pep_rmse_ms": _agg("pep_rmse_ms"),
+        "avo_rmse_ms": _agg("avo_rmse_ms"),
         "avc_rmse_ms": _agg("avc_rmse_ms"),
         "mean_rmse_ms": _agg("mean_rmse_ms"),
+        "avo_r2": _agg("avo_r2"),
+        "avc_r2": _agg("avc_r2"),
+        "mean_r2": _agg("mean_r2"),
+        "avo_medae_ms": _agg("avo_medae_ms"),
+        "avc_medae_ms": _agg("avc_medae_ms"),
+        "mean_medae_ms": _agg("mean_medae_ms"),
+        "avo_max_err_ms": _agg("avo_max_err_ms"),
+        "avc_max_err_ms": _agg("avc_max_err_ms"),
+        "mean_max_err_ms": _agg("mean_max_err_ms"),
+        "avo_bias_ms": _agg("avo_bias_ms"),
+        "avc_bias_ms": _agg("avc_bias_ms"),
+        "mean_bias_ms": _agg("mean_bias_ms"),
+        "avo_acc_10ms_%": _agg("avo_acc_10ms_%"),
+        "avc_acc_10ms_%": _agg("avc_acc_10ms_%"),
+        "mean_acc_10ms_%": _agg("mean_acc_10ms_%"),
+        "avo_acc_20ms_%": _agg("avo_acc_20ms_%"),
+        "avc_acc_20ms_%": _agg("avc_acc_20ms_%"),
+        "mean_acc_20ms_%": _agg("mean_acc_20ms_%"),
     }
 
-    print("\n=== LOSO Summary ===")
-    print(f"PEP  MAE: {summary['pep_mae_ms']['mean']:.2f} ± {summary['pep_mae_ms']['std']:.2f} ms")
-    print(f"AVC  MAE: {summary['avc_mae_ms']['mean']:.2f} ± {summary['avc_mae_ms']['std']:.2f} ms")
-    print(f"Mean MAE: {summary['mean_mae_ms']['mean']:.2f} ± {summary['mean_mae_ms']['std']:.2f} ms")
-
+    print("\n" + "="*45)
+    print(" === LOSO Summary (Averaged across folds) ===")
+    print("="*45)
+    print(f"[MAE]  AVO: {summary['avo_mae_ms']['mean']:6.2f} ± {summary['avo_mae_ms']['std']:5.2f} ms | AVC: {summary['avc_mae_ms']['mean']:6.2f} ± {summary['avc_mae_ms']['std']:5.2f} ms")
+    print(f"[RMSE] AVO: {summary['avo_rmse_ms']['mean']:6.2f} ± {summary['avo_rmse_ms']['std']:5.2f} ms | AVC: {summary['avc_rmse_ms']['mean']:6.2f} ± {summary['avc_rmse_ms']['std']:5.2f} ms")
+    print(f"[MedAE]AVO: {summary['avo_medae_ms']['mean']:6.2f} ± {summary['avo_medae_ms']['std']:5.2f} ms | AVC: {summary['avc_medae_ms']['mean']:6.2f} ± {summary['avc_medae_ms']['std']:5.2f} ms")
+    print(f"[MAX]  AVO: {summary['avo_max_err_ms']['mean']:6.2f} ± {summary['avo_max_err_ms']['std']:5.2f} ms | AVC: {summary['avc_max_err_ms']['mean']:6.2f} ± {summary['avc_max_err_ms']['std']:5.2f} ms")
+    print(f"[BIAS] AVO: {summary['avo_bias_ms']['mean']:6.2f} ± {summary['avo_bias_ms']['std']:5.2f} ms | AVC: {summary['avc_bias_ms']['mean']:6.2f} ± {summary['avc_bias_ms']['std']:5.2f} ms")
+    print(f"[<10ms]AVO: {summary['avo_acc_10ms_%']['mean']:6.1f} %           | AVC: {summary['avc_acc_10ms_%']['mean']:6.1f} %")
+    print(f"[<20ms]AVO: {summary['avo_acc_20ms_%']['mean']:6.1f} %           | AVC: {summary['avc_acc_20ms_%']['mean']:6.1f} %")
+    print("="*45)
+    
     return {"summary": summary, "folds": fold_results}
 
 
@@ -315,7 +403,8 @@ def run_loso(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Leave-One-Subject-Out cross-validation for ImprovedCNN.")
+    parser = argparse.ArgumentParser(description="Leave-One-Subject-Out cross-validation.")
+    parser.add_argument("--model_name", type=str, default="resnet", choices=["resnet", "tcn", "transformer", "cnn_lstm", "cnn"])
     parser.add_argument(
         "--data-dir", type=Path,
         default=ROOT / "outputs" / "datasets" / "dataset_clipped",
@@ -343,6 +432,7 @@ def main() -> None:
 
     results = run_loso(
         subjects,
+        model_name=args.model_name,
         epochs=args.epochs,
         patience=args.patience,
         batch_size=args.batch_size,
@@ -350,6 +440,7 @@ def main() -> None:
         seed=args.seed,
     )
     results["config"] = {
+        "model_name": args.model_name,
         "data_dir": str(args.data_dir),
         "epochs": args.epochs,
         "patience": args.patience,
