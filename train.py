@@ -190,15 +190,65 @@ def _build_model(model_name: str, input_length: int):
 
 def _compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     error = y_pred - y_true
+    
+    # 1. MAE
     mae = np.mean(np.abs(error), axis=0)
+    
+    # 2. RMSE
     rmse = np.sqrt(np.mean(np.square(error), axis=0))
+    
+    # 3. R² Score
+    ss_res = np.sum(error**2, axis=0)
+    ss_tot = np.sum((y_true - np.mean(y_true, axis=0))**2, axis=0)
+    r2 = 1 - (ss_res / (ss_tot + 1e-8))
+    
+    # 4. Median Absolute Error
+    medae = np.median(np.abs(error), axis=0)
+    
+    # 5. Max Error
+    max_err = np.max(np.abs(error), axis=0)
+    
+    # 6. Bias (Mean Error)
+    bias = np.mean(error, axis=0)
+    
+    # 7. Within ±10 ms Accuracy
+    acc_10 = np.mean(np.abs(error) <= 10.0, axis=0) * 100.0
+    
+    # 8. Within ±20 ms Accuracy
+    acc_20 = np.mean(np.abs(error) <= 20.0, axis=0) * 100.0
+
     return {
         "avo_mae_ms": float(mae[0]),
         "avc_mae_ms": float(mae[1]),
+        "mean_mae_ms": float(mae.mean()),
+        
         "avo_rmse_ms": float(rmse[0]),
         "avc_rmse_ms": float(rmse[1]),
-        "mean_mae_ms": float(mae.mean()),
         "mean_rmse_ms": float(rmse.mean()),
+        
+        "avo_r2": float(r2[0]),
+        "avc_r2": float(r2[1]),
+        "mean_r2": float(r2.mean()),
+        
+        "avo_medae_ms": float(medae[0]),
+        "avc_medae_ms": float(medae[1]),
+        "mean_medae_ms": float(medae.mean()),
+        
+        "avo_max_err_ms": float(max_err[0]),
+        "avc_max_err_ms": float(max_err[1]),
+        "mean_max_err_ms": float(max_err.mean()),
+        
+        "avo_bias_ms": float(bias[0]),
+        "avc_bias_ms": float(bias[1]),
+        "mean_bias_ms": float(bias.mean()),
+        
+        "avo_acc_10ms_%": float(acc_10[0]),
+        "avc_acc_10ms_%": float(acc_10[1]),
+        "mean_acc_10ms_%": float(acc_10.mean()),
+        
+        "avo_acc_20ms_%": float(acc_20[0]),
+        "avc_acc_20ms_%": float(acc_20[1]),
+        "mean_acc_20ms_%": float(acc_20.mean()),
     }
 
 

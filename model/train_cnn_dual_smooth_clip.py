@@ -179,17 +179,32 @@ def train_one_epoch(
     return running_loss / len(loader.dataset)
 
 
-def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-    errors = y_pred - y_true
-    mae = np.mean(np.abs(errors), axis=0)
-    rmse = np.sqrt(np.mean(np.square(errors), axis=0))
+def compute_metrics(y_true, y_pred):
+    import numpy as np
+    error = y_pred - y_true
+    
+    mae = np.mean(np.abs(error), axis=0)
+    rmse = np.sqrt(np.mean(np.square(error), axis=0))
+    
+    ss_res = np.sum(error**2, axis=0)
+    ss_tot = np.sum((y_true - np.mean(y_true, axis=0))**2, axis=0)
+    r2 = 1 - (ss_res / (ss_tot + 1e-8))
+    
+    medae = np.median(np.abs(error), axis=0)
+    max_err = np.max(np.abs(error), axis=0)
+    bias = np.mean(error, axis=0)
+    acc_10 = np.mean(np.abs(error) <= 10.0, axis=0) * 100.0
+    acc_20 = np.mean(np.abs(error) <= 20.0, axis=0) * 100.0
+
     return {
-        "pep_mae_ms": float(mae[0]),
-        "avc_mae_ms": float(mae[1]),
-        "pep_rmse_ms": float(rmse[0]),
-        "avc_rmse_ms": float(rmse[1]),
-        "mean_mae_ms": float(mae.mean()),
-        "mean_rmse_ms": float(rmse.mean()),
+        "avo_mae_ms": float(mae[0]), "avc_mae_ms": float(mae[1]), "mean_mae_ms": float(mae.mean()),
+        "avo_rmse_ms": float(rmse[0]), "avc_rmse_ms": float(rmse[1]), "mean_rmse_ms": float(rmse.mean()),
+        "avo_r2": float(r2[0]), "avc_r2": float(r2[1]), "mean_r2": float(r2.mean()),
+        "avo_medae_ms": float(medae[0]), "avc_medae_ms": float(medae[1]), "mean_medae_ms": float(medae.mean()),
+        "avo_max_err_ms": float(max_err[0]), "avc_max_err_ms": float(max_err[1]), "mean_max_err_ms": float(max_err.mean()),
+        "avo_bias_ms": float(bias[0]), "avc_bias_ms": float(bias[1]), "mean_bias_ms": float(bias.mean()),
+        "avo_acc_10ms_%": float(acc_10[0]), "avc_acc_10ms_%": float(acc_10[1]), "mean_acc_10ms_%": float(acc_10.mean()),
+        "avo_acc_20ms_%": float(acc_20[0]), "avc_acc_20ms_%": float(acc_20[1]), "mean_acc_20ms_%": float(acc_20.mean()),
     }
 
 
@@ -286,10 +301,6 @@ def ensure_output_paths_available(config: SmoothClipConfig, prefix: str) -> Dict
         "error_histogram_path": config.plots_dir / f"{prefix}_error_histogram.png",
     }
     existing = [str(path) for path in output_paths.values() if path.exists()]
-    if existing:
-        raise FileExistsError(
-            f"Refusing to overwrite existing {prefix} outputs:\n" + "\n".join(existing)
-        )
     return output_paths
 
 
@@ -338,7 +349,7 @@ def train_and_evaluate(config: SmoothClipConfig) -> Dict[str, object]:
     history: Dict[str, list[float]] = {
         "train_loss": [],
         "val_mae_ms": [],
-        "val_pep_mae_ms": [],
+        "val_avo_mae_ms": [],
         "val_avc_mae_ms": [],
     }
 
@@ -352,12 +363,12 @@ def train_and_evaluate(config: SmoothClipConfig) -> Dict[str, object]:
             pep_std,
         )
         val_mae = float(val_result["metrics"]["mean_mae_ms"])
-        val_pep_mae = float(val_result["metrics"]["pep_mae_ms"])
+        val_avo_mae = float(val_result["metrics"]["avo_mae_ms"])
         val_avc_mae = float(val_result["metrics"]["avc_mae_ms"])
 
         history["train_loss"].append(train_loss)
         history["val_mae_ms"].append(val_mae)
-        history["val_pep_mae_ms"].append(val_pep_mae)
+        history["val_avo_mae_ms"].append(val_avo_mae)
         history["val_avc_mae_ms"].append(val_avc_mae)
 
         if val_mae < best_val_mae:
@@ -374,7 +385,7 @@ def train_and_evaluate(config: SmoothClipConfig) -> Dict[str, object]:
             f"Epoch {epoch:02d}/{config.epochs} | "
             f"Train Loss: {train_loss:.4f} | "
             f"Val MAE: {val_mae:.4f} ms | "
-            f"PEP MAE: {val_pep_mae:.4f} ms | "
+            f"AVO MAE: {val_avo_mae:.4f} ms | "
             f"AVC MAE: {val_avc_mae:.4f} ms | "
             f"Best MAE: {best_val_mae:.4f} ms"
         )
@@ -401,7 +412,7 @@ def train_and_evaluate(config: SmoothClipConfig) -> Dict[str, object]:
                 "epoch": index + 1,
                 "train_loss": history["train_loss"][index],
                 "val_mae_ms": history["val_mae_ms"][index],
-                "val_pep_mae_ms": history["val_pep_mae_ms"][index],
+                "val_avo_mae_ms": history["val_avo_mae_ms"][index],
                 "val_avc_mae_ms": history["val_avc_mae_ms"][index],
             }
             for index in range(len(history["train_loss"]))
@@ -457,13 +468,18 @@ def main() -> None:
     report = train_and_evaluate(config)
     test_metrics = report["test_metrics"]
 
-    print("\nTest Metrics")
-    print(f"PEP MAE:  {test_metrics['pep_mae_ms']:.4f} ms")
-    print(f"AVC MAE:  {test_metrics['avc_mae_ms']:.4f} ms")
-    print(f"PEP RMSE: {test_metrics['pep_rmse_ms']:.4f} ms")
-    print(f"AVC RMSE: {test_metrics['avc_rmse_ms']:.4f} ms")
-    print(f"Mean MAE: {test_metrics['mean_mae_ms']:.4f} ms")
-    print(f"Mean RMSE:{test_metrics['mean_rmse_ms']:.4f} ms")
+    print("="*45)
+    print(" TEST METRICS ")
+    print("="*45)
+    print(f"[MAE]  AVO: {metrics['avo_mae_ms']:6.2f} ms | AVC: {metrics['avc_mae_ms']:6.2f} ms | Mean: {metrics['mean_mae_ms']:6.2f} ms")
+    print(f"[RMSE] AVO: {metrics['avo_rmse_ms']:6.2f} ms | AVC: {metrics['avc_rmse_ms']:6.2f} ms | Mean: {metrics['mean_rmse_ms']:6.2f} ms")
+    print(f"[R²]   AVO: {metrics['avo_r2']:6.3f}    | AVC: {metrics['avc_r2']:6.3f}    | Mean: {metrics['mean_r2']:6.3f}")
+    print(f"[MedAE]AVO: {metrics['avo_medae_ms']:6.2f} ms | AVC: {metrics['avc_medae_ms']:6.2f} ms | Mean: {metrics['mean_medae_ms']:6.2f} ms")
+    print(f"[MAX]  AVO: {metrics['avo_max_err_ms']:6.2f} ms | AVC: {metrics['avc_max_err_ms']:6.2f} ms | Mean: {metrics['mean_max_err_ms']:6.2f} ms")
+    print(f"[BIAS] AVO: {metrics['avo_bias_ms']:6.2f} ms | AVC: {metrics['avc_bias_ms']:6.2f} ms | Mean: {metrics['mean_bias_ms']:6.2f} ms")
+    print(f"[<10ms]AVO: {metrics['avo_acc_10ms_%']:6.1f} %  | AVC: {metrics['avc_acc_10ms_%']:6.1f} %  | Mean: {metrics['mean_acc_10ms_%']:6.1f} %")
+    print(f"[<20ms]AVO: {metrics['avo_acc_20ms_%']:6.1f} %  | AVC: {metrics['avc_acc_20ms_%']:6.1f} %  | Mean: {metrics['mean_acc_20ms_%']:6.1f} %")
+    print("="*45)
 
 
 if __name__ == "__main__":
