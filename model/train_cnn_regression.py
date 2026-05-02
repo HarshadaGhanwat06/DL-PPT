@@ -1,4 +1,5 @@
-﻿from __future__ import annotations
+﻿# train_cnn_regression.py
+from __future__ import annotations
 
 import argparse
 from pathlib import Path

@@ -395,3 +395,71 @@ def train_model(config: TrainingConfig) -> Dict[str, object]:
     with (config.output_dir / f"{config.model_name}_report.json").open("w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)
     return report
+
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Train cardiac timing prediction models")
+    parser.add_argument("--model", type=str, default="cnn_lstm",
+                        choices=["cnn", "cnn_lstm", "resnet", "tcn", "transformer"],
+                        help="Model architecture to train")
+    parser.add_argument("--epochs", type=int, default=25,
+                        help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=32,
+                        help="Batch size for training")
+    parser.add_argument("--learning_rate", type=float, default=1e-3,
+                        help="Learning rate for optimizer")
+    parser.add_argument("--patience", type=int, default=5,
+                        help="Early stopping patience")
+    parser.add_argument("--weight_decay", type=float, default=1e-4,
+                        help="Weight decay (L2 regularization)")
+    parser.add_argument("--consistency_lambda", type=float, default=0.1,
+                        help="Physiological consistency loss weight")
+    parser.add_argument("--no_augment", action="store_true",
+                        help="Disable data augmentation")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducibility")
+    
+    args = parser.parse_args()
+    
+    config = TrainingConfig(
+        model_name=args.model,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        patience=args.patience,
+        weight_decay=args.weight_decay,
+        consistency_lambda=args.consistency_lambda,
+        augment=not args.no_augment,
+        seed=args.seed,
+    )
+    
+    print(f"\n{'='*70}")
+    print(f"Training {config.model_name.upper()}")
+    print(f"{'='*70}")
+    print(f"Epochs: {config.epochs} | Batch Size: {config.batch_size}")
+    print(f"Learning Rate: {config.learning_rate} | Patience: {config.patience}")
+    print(f"Data Augmentation: {config.augment}")
+    print(f"{'='*70}\n")
+    
+    result = train_model(config)
+    
+    # Print final results
+    test_mae = result["test_metrics"]["mean_mae_ms"]
+    test_rmse = result["test_metrics"]["mean_rmse_ms"]
+    avo_mae = result["test_metrics"]["avo_mae_ms"]
+    avc_mae = result["test_metrics"]["avc_mae_ms"]
+    epochs_trained = len(result["history"])
+    
+    print(f"\n{'='*70}")
+    print(f"✅ Training Complete: {config.model_name.upper()}")
+    print(f"{'='*70}")
+    print(f"Epochs Trained:   {epochs_trained}")
+    print(f"Test MAE:         {test_mae:.2f} ms")
+    print(f"Test RMSE:        {test_rmse:.2f} ms")
+    print(f"AVO MAE:          {avo_mae:.2f} ms")
+    print(f"AVC MAE:          {avc_mae:.2f} ms")
+    print(f"Model saved to:   outputs/runs/{config.model_name}.pt")
+    print(f"Report saved to:  outputs/runs/{config.model_name}_report.json")
+    print(f"{'='*70}\n")
