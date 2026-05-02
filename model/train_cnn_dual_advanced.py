@@ -232,6 +232,8 @@ def plot_results(
     history: Dict[str, list[float]],
     y_true: np.ndarray,
     y_pred: np.ndarray,
+    y_true_pep_lvet: np.ndarray,
+    y_pred_pep_lvet: np.ndarray,
     output_paths: Dict[str, Path],
 ) -> Dict[str, str]:
     plt.figure(figsize=(8, 5))
@@ -242,6 +244,19 @@ def plot_results(
     plt.grid(alpha=0.3)
     plt.tight_layout()
     plt.savefig(output_paths["loss_curve_path"], dpi=200)
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(history["val_mae_ms"], label="Mean Val MAE", linewidth=2)
+    plt.plot(history["val_avo_mae_ms"], label="PEP Val MAE", linewidth=1.6)
+    plt.plot(history["val_avc_mae_ms"], label="AVC Val MAE", linewidth=1.6)
+    plt.xlabel("Epoch")
+    plt.ylabel("Validation MAE (ms)")
+    plt.title("Dual-Branch Advanced CNN Validation MAE")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(output_paths["val_mae_curve_path"], dpi=200)
     plt.close()
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -259,17 +274,63 @@ def plot_results(
     fig.savefig(output_paths["predicted_vs_true_path"], dpi=200)
     plt.close(fig)
 
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    errors = y_pred - y_true
+    for index, target_name in enumerate(["PEP Error", "AVC Error"]):
+        axes[index].hist(errors[:, index], bins=30, alpha=0.8, edgecolor="black")
+        axes[index].axvline(0.0, color="red", linestyle="--", linewidth=1.2)
+        axes[index].set_title(target_name)
+        axes[index].set_xlabel("Prediction Error (ms)")
+        axes[index].set_ylabel("Count")
+        axes[index].grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_paths["error_histogram_path"], dpi=200)
+    plt.close(fig)
+
+    # This plot isolates the physiological reconstruction step itself:
+    # the model predicts PEP and LVET, then reconstructs AVC as PEP + LVET.
+    # Plotting true AVC against reconstructed AVC makes it easier to discuss
+    # error propagation from the two intermediate predictions in reports.
+    true_reconstructed_avc = y_true_pep_lvet[:, 0] + y_true_pep_lvet[:, 1]
+    pred_reconstructed_avc = y_pred_pep_lvet[:, 0] + y_pred_pep_lvet[:, 1]
+    plt.figure(figsize=(7, 6))
+    plt.scatter(true_reconstructed_avc, pred_reconstructed_avc, alpha=0.6, s=18)
+    min_value = min(float(true_reconstructed_avc.min()), float(pred_reconstructed_avc.min()))
+    max_value = max(float(true_reconstructed_avc.max()), float(pred_reconstructed_avc.max()))
+    plt.plot([min_value, max_value], [min_value, max_value], "r--", linewidth=1.5)
+    plt.xlabel("True AVC (ms)")
+    plt.ylabel("Reconstructed AVC (ms)")
+    plt.title("PEP + LVET to AVC Reconstruction")
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(output_paths["avc_reconstruction_path"], dpi=200)
+    plt.close()
+
     return {key: str(value) for key, value in output_paths.items() if key.endswith("_path")}
 
 
 def ensure_output_paths_available(config: DualBranchAdvancedConfig) -> Dict[str, Path]:
+    prefix = "cnn_dual_advanced"
+    plot_subdir = config.plots_dir / prefix
+    plot_subdir.mkdir(parents=True, exist_ok=True)
+
     output_paths = {
-        "best_model_path": config.runs_dir / "cnn_dual_advanced_best_model.pt",
-        "report_path": config.runs_dir / "cnn_dual_advanced_report.json",
-        "loss_curve_path": config.plots_dir / "cnn_dual_advanced_loss_curve.png",
-        "predicted_vs_true_path": config.plots_dir / "cnn_dual_advanced_predicted_vs_true.png",
+        "best_model_path": config.runs_dir / f"{prefix}_best_model.pt",
+        "report_path": config.runs_dir / f"{prefix}_report.json",
+        "loss_curve_path": plot_subdir / f"{prefix}_loss_curve.png",
+        "val_mae_curve_path": plot_subdir / f"{prefix}_val_mae_curve.png",
+        "predicted_vs_true_path": plot_subdir / f"{prefix}_predicted_vs_true.png",
+        "error_histogram_path": plot_subdir / f"{prefix}_error_histogram.png",
+        "avc_reconstruction_path": plot_subdir / f"{prefix}_avc_reconstruction.png",
     }
     existing = [str(path) for path in output_paths.values() if path.exists()]
+    print(f"[DEBUG] Plot output folder: {plot_subdir}")
+    if existing:
+        print("[DEBUG] Existing artifacts detected. This run will overwrite them:")
+        for path in existing:
+            print(f"[DEBUG]   {path}")
+    else:
+        print("[DEBUG] No existing artifacts found. New files will be created.")
     return output_paths
 
 
@@ -357,7 +418,14 @@ def train_and_evaluate(config: DualBranchAdvancedConfig) -> Dict[str, object]:
     train_result = evaluate(model, train_loader, device, y_mean, y_std)
     val_result = evaluate(model, val_loader, device, y_mean, y_std)
     test_result = evaluate(model, test_loader, device, y_mean, y_std)
-    plot_paths = plot_results(history, test_result["y_true"], test_result["y_pred"], output_paths)
+    plot_paths = plot_results(
+        history,
+        test_result["y_true"],
+        test_result["y_pred"],
+        test_result["y_true_pep_lvet"],
+        test_result["y_pred_pep_lvet"],
+        output_paths,
+    )
 
     report = {
         "config": {key: str(value) if isinstance(value, Path) else value for key, value in asdict(config).items()},
