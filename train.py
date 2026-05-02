@@ -6,6 +6,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch.nn.functional as F
 
@@ -28,6 +29,7 @@ from torch.utils.data import DataLoader, TensorDataset
 class TrainingConfig:
     data_dir: Path = Path("outputs/datasets")
     output_dir: Path = Path("outputs/runs")
+    plots_dir: Path = Path("outputs/plots")
     model_name: str = "cnn_lstm"
     seed: int = 42
     epochs: int = 25
@@ -64,6 +66,38 @@ def _set_seed(seed: int) -> None:
 def _load_split(data_dir: Path, split_name: str) -> Dict[str, np.ndarray]:
     raw = np.load(data_dir / f"{split_name}.npz", allow_pickle=True)
     return {key: raw[key] for key in raw.files}
+
+
+def _ensure_plot_output_paths(config: TrainingConfig) -> Dict[str, Path]:
+    """
+    Create a per-model plot folder and define all output artifact paths.
+
+    Repeated runs intentionally reuse the same filenames so comparison stays
+    simple. When files already exist, the trainer prints that they will be
+    overwritten instead of silently replacing them.
+    """
+    plot_subdir = config.plots_dir / config.model_name
+    plot_subdir.mkdir(parents=True, exist_ok=True)
+
+    output_paths = {
+        "model_path": config.output_dir / f"{config.model_name}.pt",
+        "report_path": config.output_dir / f"{config.model_name}_report.json",
+        "loss_curve_path": plot_subdir / f"{config.model_name}_loss_curve.png",
+        "val_mae_curve_path": plot_subdir / f"{config.model_name}_val_mae_curve.png",
+        "predicted_vs_true_path": plot_subdir / f"{config.model_name}_predicted_vs_true.png",
+        "error_histogram_path": plot_subdir / f"{config.model_name}_error_histogram.png",
+    }
+
+    existing = [str(path) for path in output_paths.values() if path.exists()]
+    print(f"[DEBUG] Plot output folder: {plot_subdir}")
+    if existing:
+        print("[DEBUG] Existing artifacts detected. This run will overwrite them:")
+        for path in existing:
+            print(f"[DEBUG]   {path}")
+    else:
+        print("[DEBUG] No existing artifacts found. New files will be created.")
+
+    return output_paths
 
 
 def _make_loader(
@@ -273,6 +307,97 @@ def _evaluate_model(
     return _compute_metrics(y_true, y_pred)
 
 
+def _evaluate_model_with_predictions(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    target_mean: np.ndarray,
+    target_std: np.ndarray,
+) -> Dict[str, object]:
+    """
+    Return both scalar metrics and denormalized predictions for plotting.
+    """
+    model.eval()
+    predictions = []
+    targets = []
+    with torch.no_grad():
+        for x_batch, y_batch in loader:
+            x_batch = x_batch.to(device)
+            outputs = model(x_batch).cpu().numpy()
+            predictions.append(outputs)
+            targets.append(y_batch.numpy())
+    y_true = np.concatenate(targets, axis=0) * target_std + target_mean
+    y_pred = np.concatenate(predictions, axis=0) * target_std + target_mean
+    return {
+        "metrics": _compute_metrics(y_true, y_pred),
+        "y_true": y_true,
+        "y_pred": y_pred,
+    }
+
+
+def _plot_results(
+    history: list[Dict[str, float]],
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    output_paths: Dict[str, Path],
+    model_name: str,
+) -> Dict[str, str]:
+    """
+    Save the standard set of training/evaluation plots for a model.
+    """
+    plt.figure(figsize=(8, 5))
+    plt.plot([epoch["train_loss"] for epoch in history], linewidth=2)
+    plt.xlabel("Epoch")
+    plt.ylabel("Training Loss")
+    plt.title(f"{model_name.upper()} Training Loss")
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(output_paths["loss_curve_path"], dpi=200)
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot([epoch["mean_mae_ms"] for epoch in history], label="Mean Val MAE", linewidth=2)
+    plt.plot([epoch["avo_mae_ms"] for epoch in history], label="PEP Val MAE", linewidth=1.6)
+    plt.plot([epoch["avc_mae_ms"] for epoch in history], label="AVC Val MAE", linewidth=1.6)
+    plt.xlabel("Epoch")
+    plt.ylabel("Validation MAE (ms)")
+    plt.title(f"{model_name.upper()} Validation MAE")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(output_paths["val_mae_curve_path"], dpi=200)
+    plt.close()
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    for index, target_name in enumerate(["PEP", "AVC"]):
+        axes[index].scatter(y_true[:, index], y_pred[:, index], alpha=0.6, s=16)
+        min_value = min(float(y_true[:, index].min()), float(y_pred[:, index].min()))
+        max_value = max(float(y_true[:, index].max()), float(y_pred[:, index].max()))
+        axes[index].plot([min_value, max_value], [min_value, max_value], "r--", linewidth=1.5)
+        axes[index].set_title(f"{target_name}: Predicted vs True")
+        axes[index].set_xlabel("True (ms)")
+        axes[index].set_ylabel("Predicted (ms)")
+        axes[index].grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_paths["predicted_vs_true_path"], dpi=200)
+    plt.close(fig)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    errors = y_pred - y_true
+    for index, target_name in enumerate(["PEP Error", "AVC Error"]):
+        axes[index].hist(errors[:, index], bins=30, alpha=0.8, edgecolor="black")
+        axes[index].axvline(0.0, color="red", linestyle="--", linewidth=1.2)
+        axes[index].set_title(target_name)
+        axes[index].set_xlabel("Prediction Error (ms)")
+        axes[index].set_ylabel("Count")
+        axes[index].grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_paths["error_histogram_path"], dpi=200)
+    plt.close(fig)
+
+    return {key: str(value) for key, value in output_paths.items() if key.endswith("_path")}
+
+
 def _baseline_metrics(split_data: Dict[str, np.ndarray]) -> Dict[str, float]:
     return _compute_metrics(split_data["y"], split_data["baseline"])
 
@@ -280,7 +405,9 @@ def _baseline_metrics(split_data: Dict[str, np.ndarray]) -> Dict[str, float]:
 def train_model(config: TrainingConfig) -> Dict[str, object]:
     _set_seed(config.seed)
     config.output_dir.mkdir(parents=True, exist_ok=True)
+    config.plots_dir.mkdir(parents=True, exist_ok=True)
     _ensure_runtime_dirs(config.output_dir.parent)
+    output_paths = _ensure_plot_output_paths(config)
 
     train_data = _load_split(config.data_dir, "train")
     val_data = _load_split(config.data_dir, "val")
@@ -377,10 +504,12 @@ def train_model(config: TrainingConfig) -> Dict[str, object]:
     # Final evaluation uses the best EMA weights loaded into model
     train_metrics = _evaluate_model(model, train_loader, device, target_mean=target_mean, target_std=target_std)
     val_metrics = _evaluate_model(model, val_loader, device, target_mean=target_mean, target_std=target_std)
-    test_metrics = _evaluate_model(model, test_loader, device, target_mean=target_mean, target_std=target_std)
+    test_result = _evaluate_model_with_predictions(model, test_loader, device, target_mean=target_mean, target_std=target_std)
+    test_metrics = test_result["metrics"]
     test_baseline = _baseline_metrics(test_data)
+    plot_paths = _plot_results(history, test_result["y_true"], test_result["y_pred"], output_paths, config.model_name)
 
-    torch.save(model.state_dict(), config.output_dir / f"{config.model_name}.pt")
+    torch.save(model.state_dict(), output_paths["model_path"])
 
     report: Dict[str, object] = {
         "config": _config_to_jsonable_dict(config),
@@ -391,8 +520,13 @@ def train_model(config: TrainingConfig) -> Dict[str, object]:
         "target_mean_ms": target_mean.tolist(),
         "target_std_ms": target_std.tolist(),
         "history": history,
+        "artifacts": {
+            "model_path": str(output_paths["model_path"]),
+            "report_path": str(output_paths["report_path"]),
+            **plot_paths,
+        },
     }
-    with (config.output_dir / f"{config.model_name}_report.json").open("w", encoding="utf-8") as handle:
+    with output_paths["report_path"].open("w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)
     return report
 

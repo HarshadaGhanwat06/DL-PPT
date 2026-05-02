@@ -221,6 +221,21 @@ def plot_loss_curves(history: Dict[str, list[float]], output_path: Path) -> None
     plt.close()
 
 
+def plot_validation_mae(history: Dict[str, list[float]], output_path: Path) -> None:
+    plt.figure(figsize=(8, 5))
+    plt.plot(history['val_mae'], label='Mean Val MAE', linewidth=2)
+    plt.plot(history['val_avo_mae'], label='PEP Val MAE', linewidth=1.6)
+    plt.plot(history['val_avc_mae'], label='AVC Val MAE', linewidth=1.6)
+    plt.xlabel('Epoch')
+    plt.ylabel('Validation MAE (ms)')
+    plt.title('CNN Regression Validation MAE')
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200)
+    plt.close()
+
+
 def plot_predictions(y_true: np.ndarray, y_pred: np.ndarray, output_path: Path) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     target_names = ['PEP', 'AVC']
@@ -269,6 +284,10 @@ def train_cnn_regressor(config: CNNRegressionConfig) -> Dict[str, object]:
     ensure_runtime_dirs(config.runs_dir.parent)
     set_seed(config.seed)
 
+    prefix = 'cnn_regression'
+    plot_subdir = config.plots_dir / prefix
+    plot_subdir.mkdir(parents=True, exist_ok=True)
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     train_loader, val_loader, test_loader = create_dataloaders(config)
 
@@ -277,21 +296,45 @@ def train_cnn_regressor(config: CNNRegressionConfig) -> Dict[str, object]:
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     early_stopping = EarlyStopping(patience=config.patience)
 
-    history = {'train_loss': [], 'val_loss': []}
+    history = {'train_loss': [], 'val_loss': [], 'val_mae': [], 'val_avo_mae': [], 'val_avc_mae': []}
     best_model_path = config.runs_dir / 'standalone_cnn_best.pt'
     report_path = config.runs_dir / 'standalone_cnn_report.json'
-    loss_curve_path = config.plots_dir / 'standalone_cnn_loss_curve.png'
-    predictions_path = config.plots_dir / 'standalone_cnn_predicted_vs_true.png'
-    error_histogram_path = config.plots_dir / 'standalone_cnn_error_histogram.png'
+    loss_curve_path = plot_subdir / f'{prefix}_loss_curve.png'
+    val_mae_curve_path = plot_subdir / f'{prefix}_val_mae_curve.png'
+    predictions_path = plot_subdir / f'{prefix}_predicted_vs_true.png'
+    error_histogram_path = plot_subdir / f'{prefix}_error_histogram.png'
+
+    existing = [
+        str(path)
+        for path in (best_model_path, report_path, loss_curve_path, val_mae_curve_path, predictions_path, error_histogram_path)
+        if path.exists()
+    ]
+    print(f'[DEBUG] Plot output folder: {plot_subdir}')
+    if existing:
+        print('[DEBUG] Existing artifacts detected. This run will overwrite them:')
+        for path in existing:
+            print(f'[DEBUG]   {path}')
+    else:
+        print('[DEBUG] No existing artifacts found. New files will be created.')
 
     for epoch in range(1, config.epochs + 1):
         train_loss = run_epoch(model, train_loader, criterion, device, optimizer=optimizer)
         val_loss = run_epoch(model, val_loader, criterion, device, optimizer=None)
+        val_pred, val_true = predict(model, val_loader, device)
+        val_metrics = compute_metrics(val_true, val_pred)
 
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
+        history['val_mae'].append(val_metrics['mean_mae_ms'])
+        history['val_avo_mae'].append(val_metrics['avo_mae_ms'])
+        history['val_avc_mae'].append(val_metrics['avc_mae_ms'])
 
-        print(f'Epoch {epoch:02d}/{config.epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}')
+        print(
+            f'Epoch {epoch:02d}/{config.epochs} | '
+            f'Train Loss: {train_loss:.4f} | '
+            f'Val Loss: {val_loss:.4f} | '
+            f'Val MAE: {val_metrics["mean_mae_ms"]:.4f} ms'
+        )
 
         improved = early_stopping.step(val_loss)
         if improved:
@@ -308,6 +351,7 @@ def train_cnn_regressor(config: CNNRegressionConfig) -> Dict[str, object]:
     metrics = compute_metrics(y_true, y_pred)
 
     plot_loss_curves(history, loss_curve_path)
+    plot_validation_mae(history, val_mae_curve_path)
     plot_predictions(y_true, y_pred, predictions_path)
     plot_error_histogram(y_true, y_pred, error_histogram_path)
     save_report(config, history, metrics, report_path)
@@ -317,9 +361,10 @@ def train_cnn_regressor(config: CNNRegressionConfig) -> Dict[str, object]:
         'history': history,
         'best_model_path': str(best_model_path),
         'report_path': str(report_path),
-        'plots_dir': str(config.plots_dir),
+        'plots_dir': str(plot_subdir),
         'runs_dir': str(config.runs_dir),
         'loss_curve_path': str(loss_curve_path),
+        'val_mae_curve_path': str(val_mae_curve_path),
         'predictions_path': str(predictions_path),
         'error_histogram_path': str(error_histogram_path),
     }

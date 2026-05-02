@@ -262,6 +262,19 @@ def plot_results(
     plt.savefig(output_paths["loss_curve_path"], dpi=200)
     plt.close()
 
+    plt.figure(figsize=(8, 5))
+    plt.plot(history["val_mae_ms"], label="Mean Val MAE", linewidth=2)
+    plt.plot(history["val_avo_mae_ms"], label="PEP Val MAE", linewidth=1.6)
+    plt.plot(history["val_avc_mae_ms"], label="AVC Val MAE", linewidth=1.6)
+    plt.xlabel("Epoch")
+    plt.ylabel("Validation MAE (ms)")
+    plt.title(f"{prefix} Validation MAE")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(output_paths["val_mae_curve_path"], dpi=200)
+    plt.close()
+
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     for index, target_name in enumerate(["PEP", "AVC"]):
         axes[index].scatter(y_true[:, index], y_pred[:, index], alpha=0.6, s=16)
@@ -293,14 +306,25 @@ def plot_results(
 
 
 def ensure_output_paths_available(config: SmoothClipConfig, prefix: str) -> Dict[str, Path]:
+    plot_subdir = config.plots_dir / prefix
+    plot_subdir.mkdir(parents=True, exist_ok=True)
+
     output_paths = {
         "best_model_path": config.runs_dir / f"{prefix}_best_model.pt",
         "report_path": config.runs_dir / f"{prefix}_report.json",
-        "loss_curve_path": config.plots_dir / f"{prefix}_loss_curve.png",
-        "predicted_vs_true_path": config.plots_dir / f"{prefix}_predicted_vs_true.png",
-        "error_histogram_path": config.plots_dir / f"{prefix}_error_histogram.png",
+        "loss_curve_path": plot_subdir / f"{prefix}_loss_curve.png",
+        "val_mae_curve_path": plot_subdir / f"{prefix}_val_mae_curve.png",
+        "predicted_vs_true_path": plot_subdir / f"{prefix}_predicted_vs_true.png",
+        "error_histogram_path": plot_subdir / f"{prefix}_error_histogram.png",
     }
     existing = [str(path) for path in output_paths.values() if path.exists()]
+    print(f"[DEBUG] Plot output folder: {plot_subdir}")
+    if existing:
+        print("[DEBUG] Existing artifacts detected. This run will overwrite them:")
+        for path in existing:
+            print(f"[DEBUG]   {path}")
+    else:
+        print("[DEBUG] No existing artifacts found. New files will be created.")
     return output_paths
 
 
@@ -312,7 +336,7 @@ def train_and_evaluate(config: SmoothClipConfig) -> Dict[str, object]:
 
     data = load_data(config.data_dir)
     target_variant = data["target_variant"]
-    prefix = "cnn_dual_clipped"
+    prefix = "cnn_dual_smooth_clipped"
     output_paths = ensure_output_paths_available(config, prefix)
 
     train_split = data["splits"]["train"]
