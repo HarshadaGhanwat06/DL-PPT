@@ -1,265 +1,391 @@
 ﻿# DL-PPT: Heartbeat Event Prediction from ICG Signals
 
-This repository builds a complete deep learning pipeline for predicting cardiac timing events from heartbeat-level impedance cardiography (ICG) segments.
+DL-PPT is a research-oriented pipeline for estimating cardiac timing parameters from synchronized physiological waveforms. The project evolved from a single-channel convolutional baseline into multi-branch physiological models, subject-independent validation, and a final hybrid deep learning plus gradient boosting workflow.
 
-The project uses the HeartCycle HDF5 dataset, extracts synchronized physiological signals, prepares beat-level training samples, and trains regression models to estimate cardiac event timings.
+The two main targets are:
 
-## Project Goal
+- `PEP` (Pre-Ejection Period)
+- `AVC` (Aortic Valve Closure)
 
-Given one heartbeat segment of processed ICG (`dZ/dt`), predict cardiac timing targets such as:
+## Project Overview
 
-- `AVO` / `PEP`: timing of aortic valve opening relative to ECG R-peak
-- `AVC`: timing of aortic valve closure relative to ECG R-peak
-- derived systolic intervals such as `LVET`
+The repository builds beat-level learning pipelines from raw HeartCycle HDF5 recordings. Each heartbeat is aligned to the ECG R-peak, converted into fixed-length segments, and used for regression of cardiac event timings in milliseconds.
 
-## Dataset
+Signals used in the final pipeline:
 
-The raw dataset is stored in `data/` as HDF5 (`.h5`) files.
-
-Signals used in this project:
-
-- ECG
-- raw ICG impedance signal
-- ECG R-peaks
-- AVO labels
+- `ECG`
+- raw impedance cardiography (`ICG`)
+- derived `dZ/dt`
+- R-peaks
+- AVO / PEP labels
 - AVC labels
-- PEP
-- LVET
+- LVET labels
 
-Important HDF5 signal IDs:
+The final dataset format is centered on dual-channel inputs:
 
-- `_030` -> ECG
-- `_031` -> raw impedance / ICG
-- `_032` -> R-peaks
-- `_033` -> AVO
-- `_034` -> PEP / PPEjec
-- `_035` -> AVC
-- `_036` -> LVET
+- channel 0: `dZ/dt`
+- channel 1: `ECG`
 
-## Current Dataset Summary
+with target pairs defined in milliseconds.
 
-Based on the current inspection and preparation pipeline:
+## Data Processing and Methodology
 
-- 212 HDF5 records were found
-- 17 subjects are included
-- beat-level windows are resampled to length `160`
-- subject-wise train/validation/test splitting is used
-- generated dataset files are stored in `outputs/datasets/`
+### Signal Extraction
 
-Prepared dataset files:
+Raw physiological signals are loaded from `.h5` files in `data/`. The loader reads ECG, raw ICG, R-peaks, AVO, AVC, PEP, and LVET annotations, then derives subject IDs for subject-wise splitting.
 
-- `outputs/datasets/train.npz`
-- `outputs/datasets/val.npz`
-- `outputs/datasets/test.npz`
-- `outputs/datasets/all_segments.npz`
-- `outputs/datasets/summary.json`
+### dZ/dt Transformation
 
-## Preprocessing Pipeline
+The raw impedance signal is transformed into `dZ/dt` using a numerical derivative, followed by baseline correction and smoothing. This highlights rapid mechanical changes that are more informative for valve event prediction than raw impedance alone.
 
-The dataset preparation pipeline does the following:
+### Beat Segmentation
 
-1. Load all `.h5` files
-2. Read ECG, ICG, R-peaks, AVO, AVC, PEP, LVET
-3. Convert raw ICG to `dZ/dt`
-4. Smooth and normalize the signal
-5. Segment heartbeats using ECG R-peaks
-6. Align each segment with corresponding targets
-7. Filter invalid beats using physiological rules
-8. Save train, validation, and test splits
+Each sample is extracted around an ECG R-peak using a fixed temporal window:
 
-## Implemented Models
+- `250 ms` before the R-peak
+- `500 ms` after the R-peak
 
-### 1. Baseline Model
+Both ECG and `dZ/dt` are resampled to length `160`, producing fixed-size heartbeat representations suitable for neural models.
 
-`CNNRegressor` in `models.py`
+### Normalization and Filtering
 
-- 1D convolutional neural network
-- learns waveform features from beat segments
-- used as the baseline deep learning model
+Each beat segment is normalized independently to reduce amplitude variation across subjects. The pipeline also applies physiological validity checks to remove implausible beats before training. In later experiments, clipped target variants were introduced to reduce the effect of noisy AVC labels.
 
-### 2. Main Model
+### Target Formulation
 
-`CNNLSTMRegressor` in `models.py`
+The project uses two target formulations:
 
-- CNN feature extractor + LSTM temporal model
-- designed to capture both waveform shape and sequential heartbeat dynamics
-- this is the primary model for the project
+- direct regression: `[PEP, AVC]`
+- physiological reformulation: `[PEP, LVET]`, with `AVC = PEP + LVET`
 
-### 3. Standalone CNN Experiment
+This reformulation was important because it reduced target redundancy and improved physiological interpretability.
 
-Files in `model/`:
+## Finalized Models
 
-- `model/cnn_regression.py`
-- `model/train_cnn_regression.py`
+### Baseline CNN Regression Model
 
-This is a separate CNN-only regression pipeline that also produces:
+Purpose: establish a benchmark architecture for direct cardiac event regression.
 
-- loss curve
-- predicted vs true plot
-- error histogram
-- saved CNN weights
+Main characteristics:
 
-Its generated outputs are stored in:
+- single-channel `dZ/dt` input
+- direct prediction of `PEP` and `AVC`
+- `Conv1D + BatchNorm + MaxPool + Fully Connected` layers
+- `MSE` loss
 
-- `outputs/runs/` for `.pt` and `.json` artifacts
-- `outputs/plots/` for generated plots
+This model provides the simplest reference point for comparing later architectural and physiological improvements.
+
+### Improved CNN
+
+Purpose: strengthen feature extraction and training stability beyond the baseline.
+
+Main characteristics:
+
+- dual-channel `ECG + dZ/dt` input
+- deeper convolutional blocks
+- batch normalization after convolution layers
+- adaptive / global average pooling
+- dropout regularization
+- `SmoothL1Loss`
+
+This model improved training stability and feature learning, and it became the main backbone for later hybrid experiments. In the saved `cnn_improved_v2` results, it delivered the strongest standalone `PEP` performance among the finalized CNN variants.
+
+### Smooth-Clipped Dual CNN
+
+Purpose: improve robustness to noisy physiological labels, especially for `AVC`.
+
+Main characteristics:
+
+- dual-branch architecture with separate signal processing paths
+- direct regression of `PEP` and `AVC`
+- clipped targets for more robust learning
+- weighted `SmoothL1` / Huber-style objective
+
+This model was designed to reduce the impact of extreme `AVC` labels while preserving end-to-end regression.
+
+### Advanced Physiological Dual CNN
+
+Purpose: improve physiological learning by reformulating the target space.
+
+Main characteristics:
+
+- dual-branch architecture with richer shared feature learning
+- separate output heads
+- predicts `PEP` and `LVET`
+- reconstructs `AVC` using `AVC = PEP + LVET`
+- `Log-Cosh` loss
+
+This model reduced direct dependence on noisy `AVC` supervision and made the regression problem more physiologically meaningful.
+
+### ResNet Model
+
+Purpose: test deeper convolutional learning with better optimization behavior.
+
+Main characteristics:
+
+- residual skip connections
+- deeper stable learning
+- improved gradient flow
+
+The residual architecture was introduced to explore whether depth alone could improve event prediction without destabilizing optimization.
+
+### TCN (Temporal Convolutional Network)
+
+Purpose: capture long-range temporal structure more effectively than standard CNNs.
+
+Main characteristics:
+
+- dilated temporal convolutions
+- expanded receptive field without recurrent layers
+- strong temporal dependency modeling
+
+Among the advanced architectures, the TCN showed the strongest temporal modeling behavior and the best research potential for subject-independent evaluation.
+
+### Transformer Model
+
+Purpose: model global temporal relationships using self-attention.
+
+Main characteristics:
+
+- self-attention encoder architecture
+- global temporal dependency modeling
+- flexible sequence representation learning
+
+In practice, the Transformer showed overfitting tendencies because the dataset remains relatively small at the subject level, making it less reliable than the best convolutional and physiological models.
+
+## Hybrid CNN + XGBoost Framework
+
+The final hybrid design separates the two tasks by using the most suitable model family for each target:
+
+- CNN for `PEP` prediction and deep feature extraction
+- XGBoost for `AVC` regression
+
+Pipeline:
+
+```text
+ECG + dZ/dt
+    ↓
+Improved CNN
+    ↓
+Deep Feature Extraction
+    ↓
+XGBoost
+    ↓
+AVC Prediction
+```
+
+Motivation:
+
+- CNNs are well suited for precise temporal pattern learning, which benefits `PEP`
+- gradient boosting is more robust to noisy nonlinear targets, which benefits `AVC`
+- the hybrid design keeps the representation learning power of deep models while improving regression robustness
+
+The final corrected hybrid pipeline enforces feature consistency:
+
+- the same `cnn_improved_v2` backbone is used for feature extraction and hybrid inference
+- old mixed-backbone feature reuse is avoided
+- train / validation / test separation is preserved throughout feature extraction and XGBoost training
+
+## Training Strategy
+
+The finalized training pipelines use the following core strategy:
+
+- `Adam` or `AdamW` optimization depending on the model branch
+- early stopping based on validation performance
+- learning-rate scheduling with `ReduceLROnPlateau`
+- batch normalization for stable internal activations
+- dropout for regularization
+- weight decay to reduce overfitting
+
+Later models also introduced:
+
+- weighted losses to emphasize harder `AVC`-related targets
+- robust losses such as `SmoothL1Loss` and `Log-Cosh`
+- target engineering through clipping and physiological reformulation
+
+## Validation Strategy
+
+Subject-independent evaluation is critical because the dataset contains repeated beats from a limited number of subjects. The project therefore uses Leave-One-Subject-Out Cross-Validation (`LOSO-CV`) for advanced evaluation.
+
+LOSO-CV procedure:
+
+1. Hold out one subject as the test fold.
+2. Train on the remaining `N - 1` subjects.
+3. Evaluate on the unseen subject.
+4. Repeat for every subject.
+5. Aggregate metrics across folds.
+
+Purpose:
+
+- prevents subject leakage
+- measures generalization to unseen physiology
+- provides a more realistic evaluation than a single random split
+
+## Evaluation Metrics
+
+The project reports both error magnitude and calibration-oriented metrics.
+
+Let `y_i` be the ground-truth target and `ŷ_i` the prediction for `n` samples.
+
+### Mean Absolute Error (MAE)
+
+```text
+MAE = (1 / n) * Σ |y_i - ŷ_i|
+```
+
+Measures average absolute timing error in milliseconds.
+
+### Root Mean Squared Error (RMSE)
+
+```text
+RMSE = sqrt((1 / n) * Σ (y_i - ŷ_i)^2)
+```
+
+Penalizes larger errors more strongly than MAE.
+
+### Coefficient of Determination (R²)
+
+```text
+R² = 1 - (Σ (y_i - ŷ_i)^2 / Σ (y_i - ȳ)^2)
+```
+
+Measures how much target variance is explained by the model.
+
+### Median Absolute Error (MedAE)
+
+```text
+MedAE = median(|y_i - ŷ_i|)
+```
+
+Provides a robust central error measure that is less sensitive to outliers.
+
+### Bias
+
+```text
+Bias = (1 / n) * Σ (ŷ_i - y_i)
+```
+
+Measures systematic overestimation or underestimation.
+
+### Accuracy Within ±10 ms
+
+```text
+Acc_10 = (count(|y_i - ŷ_i| <= 10) / n) * 100
+```
+
+Measures the percentage of predictions falling within `±10 ms` of ground truth.
+
+### Accuracy Within ±20 ms
+
+```text
+Acc_20 = (count(|y_i - ŷ_i| <= 20) / n) * 100
+```
+
+Measures the percentage of predictions falling within `±20 ms` of ground truth.
+
+## Experimental Findings
+
+The finalized experiments show a consistent pattern:
+
+- the improved CNN substantially stabilized feature extraction and training compared with the original baseline CNN
+- the physiological dual-head formulation improved `PEP` learning by predicting `LVET` instead of direct `AVC`
+- clipped-target training improved robustness to noisy physiological labels
+- the TCN provided the strongest temporal modeling behavior among the advanced deep architectures
+- the Transformer underperformed because the available subject count is too small for stable attention-heavy modeling
+- the hybrid CNN + XGBoost design demonstrated a useful modular regression approach, especially for handling noisy `AVC`
+- physiological target engineering contributed more than simply increasing architecture complexity
+
+Representative saved results in `outputs/runs/` also reflect this tradeoff:
+
+- `cnn_improved_v2` produced the strongest standalone `PEP` result among finalized CNN variants
+- `xgb_report.json` shows XGBoost remained competitive for `AVC`, supporting the hybrid design motivation
 
 ## Repository Structure
 
 ```text
 DL-PPT/
-|-- data/                     # raw HeartCycle HDF5 files
+|-- data/                           # Raw HeartCycle HDF5 files
 |-- outputs/
-|   `-- datasets/            # prepared train/val/test NPZ files
-|-- model/                   # standalone CNN regression experiment
+|   |-- datasets/                   # Prepared train/val/test datasets
+|   |-- features/                   # CNN feature arrays for XGBoost
+|   |-- plots/                      # Saved visualizations
+|   `-- runs/                       # Models and JSON reports
+|-- model/
+|   |-- cnn_improved.py             # Improved dual-channel CNN
+|   |-- cnn_dual_smooth_clip.py     # Smooth-clipped dual-branch CNN
+|   |-- cnn_dual_advanced.py        # Physiological PEP + LVET model
+|   |-- cnn_feature_extractor.py    # CNN backbone for hybrid features
+|   |-- extract_features.py         # Hybrid feature extraction
+|   |-- train_xgboost.py            # XGBoost training on CNN features
+|   |-- final_hybrid_model.py       # Final hybrid inference pipeline
+|   `-- loso_cv.py                  # Leave-One-Subject-Out evaluation
 |-- scripts/
-|   |-- inspect_dataset.py   # inspect dataset structure and label quality
-|   |-- prepare_dataset.py   # create beat-level NPZ datasets
-|   |-- train_model.py       # train baseline CNN or CNN+LSTM
-|   `-- visualize_results.py # helper visualization script
-|-- data.py                  # data loading, preprocessing, segmentation
-|-- models.py                # CNN and CNN+LSTM model definitions
-|-- train.py                 # main training and evaluation pipeline
-|-- dataset_test.py          # quick dataset sanity check
+|   |-- inspect_dataset.py
+|   |-- prepare_dataset.py
+|   |-- train_model.py
+|   `-- visualize_results.py
+|-- data.py                         # Data extraction and preprocessing
+|-- models.py                       # Baseline, ResNet, TCN, Transformer
+|-- train.py                        # Main training/evaluation pipeline
 `-- README.md
 ```
 
-## Main Files Explained
-
-### `data.py`
-
-Contains the full dataset processing logic:
-
-- HDF5 loading
-- raw ICG -> `dZ/dt`
-- heartbeat segmentation
-- label extraction
-- quality filtering
-- dataset split creation
-
-### `models.py`
-
-Defines the main project models:
-
-- `CNNRegressor`
-- `CNNLSTMRegressor`
-
-### `train.py`
-
-Contains the training loop for the main project pipeline:
-
-- dataset loading from `outputs/datasets/`
-- model selection
-- target normalization
-- optimization
-- validation
-- early stopping behavior through best-model tracking
-- test evaluation
-- report saving
-
-### `scripts/train_model.py`
-
-Command-line entry point for training the main models.
-
 ## How to Run
 
-### 1. Inspect dataset
-
-```powershell
-.\.venv\Scripts\python.exe scripts\inspect_dataset.py
-```
-
-### 2. Prepare dataset
+Prepare the dataset:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\prepare_dataset.py
 ```
 
-### 3. Train baseline CNN
+Train the main baseline-style models:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\train_model.py --model cnn --epochs 10
+.\.venv\Scripts\python.exe scripts\train_model.py --model cnn
+.\.venv\Scripts\python.exe scripts\train_model.py --model cnn_lstm
 ```
 
-### 4. Train main CNN + LSTM model
+Train the improved CNN:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\train_model.py --model cnn_lstm --epochs 15
+.\.venv\Scripts\python.exe model\train_cnn_improved.py
 ```
 
-### 5. Run standalone CNN regression experiment
+Train the clipped dual-branch model:
 
 ```powershell
-.\.venv\Scripts\python.exe model\train_cnn_regression.py
+.\.venv\Scripts\python.exe model\train_cnn_dual_smooth_clip.py --data-dir outputs/datasets/dataset_clipped
 ```
 
-## Outputs
+Train the advanced physiological model:
 
-### Main training pipeline outputs
+```powershell
+.\.venv\Scripts\python.exe model\train_cnn_dual_advanced.py
+```
 
-Saved under `outputs/runs/` when `scripts/train_model.py` is run:
+Extract features and train XGBoost:
 
-- `cnn.pt`
-- `cnn_report.json`
-- `cnn_lstm.pt`
-- `cnn_lstm_report.json`
+```powershell
+.\.venv\Scripts\python.exe model\extract_features.py --split train
+.\.venv\Scripts\python.exe model\extract_features.py --split val
+.\.venv\Scripts\python.exe model\extract_features.py --split test
+.\.venv\Scripts\python.exe model\train_xgboost.py --feature-dir outputs/features
+```
 
-These reports contain:
+Run the final hybrid model:
 
-- configuration used for training
-- train / validation / test metrics
-- baseline comparison metrics
-- target normalization statistics
-- per-epoch history
+```powershell
+.\.venv\Scripts\python.exe model\final_hybrid_model.py --split test
+```
 
-### Standalone CNN outputs
+## Final Conclusion
 
-Saved under `outputs/runs/`:
+The final outcome of this project is not simply that deeper models perform better. Instead, the experiments show that target engineering and physiological reformulation were more impactful than blindly increasing architecture complexity.
 
-- `standalone_cnn_best.pt`
-- `standalone_cnn_report.json`
+The strongest research directions emerging from the project are:
 
-Saved under `outputs/plots/`:
+- physiological dual-branch modeling with explicit `PEP` / `LVET` structure
+- TCN-based temporal modeling
+- subject-independent evaluation via `LOSO-CV`
 
-- `standalone_cnn_loss_curve.png`
-- `standalone_cnn_predicted_vs_true.png`
-- `standalone_cnn_error_histogram.png`
-
-## Evaluation Metrics
-
-Models are evaluated using:
-
-- MAE
-- RMSE
-
-for both regression targets.
-
-## Environment
-
-This project is currently set up with a local virtual environment in `.venv`.
-
-Typical Python libraries used:
-
-- `numpy`
-- `h5py`
-- `matplotlib`
-- `torch`
-- `scikit-learn`
-- `scipy`
-
-## Notes
-
-- Paths in the scripts have been updated to resolve from the project root.
-- Subject-wise splitting is used to reduce leakage between train and test sets.
-- Dataset filtering removes physiologically invalid beats before training.
-- `dataset_test.py` is only for dataset sanity checking and does not contain model code.
-
-## Future Improvements
-
-Possible next steps:
-
-- add Transformer-based time-series model
-- improve baseline signal heuristics
-- add richer evaluation plots for main models
-- export predictions beat-by-beat for error analysis
-- clean remaining debug prints in `data.py`
+Overall, LOSO-CV provided the most realistic evaluation protocol, and the combination of physiological insight plus robust learning design proved more valuable than architecture scaling alone.
