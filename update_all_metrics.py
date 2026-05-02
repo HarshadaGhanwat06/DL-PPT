@@ -79,3 +79,52 @@ for f in files:
         with open(f, 'w', encoding='utf-8') as file:
             file.write(content)
         print(f"Updated {f}")
+
+
+# Display metrics for newly trained models
+print("\n" + "="*70)
+print("NEWLY TRAINED MODELS: RESNET, TCN, TRANSFORMER")
+print("="*70 + "\n")
+
+import json
+from pathlib import Path
+
+runs_dir = Path("outputs/runs")
+models = ["resnet", "tcn", "transformer"]
+
+for model_name in models:
+    report_path = runs_dir / f"{model_name}_report.json"
+    
+    if not report_path.exists():
+        print(f"⚠️  {model_name.upper()}: Report not found\n")
+        continue
+    
+    with open(report_path, "r", encoding="utf-8") as f:
+        report = json.load(f)
+    
+    epochs_trained = len(report["history"])
+    config_epochs = report["config"]["epochs"]
+    metrics = report["test_metrics"]
+    
+    # Print training status
+    if epochs_trained >= config_epochs:
+        status = "✅ FULLY TRAINED"
+    else:
+        status = f"⏸️  EARLY STOPPED (patience)"
+    
+    print(f"{status} | {model_name.upper()}: {epochs_trained}/{config_epochs} epochs\n")
+    
+    # Print detailed metrics in standard format
+    print("="*45)
+    print(f" {model_name.upper()} TEST METRICS ")
+    print("="*45)
+    print(f"[MAE]  AVO: {metrics['avo_mae_ms']:6.2f} ms | AVC: {metrics['avc_mae_ms']:6.2f} ms | Mean: {metrics['mean_mae_ms']:6.2f} ms")
+    print(f"[RMSE] AVO: {metrics['avo_rmse_ms']:6.2f} ms | AVC: {metrics['avc_rmse_ms']:6.2f} ms | Mean: {metrics['mean_rmse_ms']:6.2f} ms")
+    print(f"[R²]   AVO: {metrics['avo_r2']:6.3f}    | AVC: {metrics['avc_r2']:6.3f}    | Mean: {metrics['mean_r2']:6.3f}")
+    print(f"[MedAE]AVO: {metrics['avo_medae_ms']:6.2f} ms | AVC: {metrics['avc_medae_ms']:6.2f} ms | Mean: {metrics['mean_medae_ms']:6.2f} ms")
+    print(f"[MAX]  AVO: {metrics['avo_max_err_ms']:6.2f} ms | AVC: {metrics['avc_max_err_ms']:6.2f} ms | Mean: {metrics['mean_max_err_ms']:6.2f} ms")
+    print(f"[BIAS] AVO: {metrics['avo_bias_ms']:6.2f} ms | AVC: {metrics['avc_bias_ms']:6.2f} ms | Mean: {metrics['mean_bias_ms']:6.2f} ms")
+    print(f"[<10ms]AVO: {metrics['avo_acc_10ms_%']:6.1f} %  | AVC: {metrics['avc_acc_10ms_%']:6.1f} %  | Mean: {metrics['mean_acc_10ms_%']:6.1f} %")
+    print(f"[<20ms]AVO: {metrics['avo_acc_20ms_%']:6.1f} %  | AVC: {metrics['avc_acc_20ms_%']:6.1f} %  | Mean: {metrics['mean_acc_20ms_%']:6.1f} %")
+    print("="*45)
+    print()

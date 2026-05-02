@@ -1,3 +1,4 @@
+# train_cnn_dual_smooth_clip.py
 from __future__ import annotations
 
 import argparse
@@ -137,7 +138,6 @@ def compute_loss(
     pep_pred: torch.Tensor,
     avc_pred: torch.Tensor,
     targets: torch.Tensor,
-    target_variant: str,
 ) -> tuple[torch.Tensor, float, float]:
     """
     Compute the task-specific loss.
@@ -471,14 +471,14 @@ def main() -> None:
     print("="*45)
     print(" TEST METRICS ")
     print("="*45)
-    print(f"[MAE]  AVO: {metrics['avo_mae_ms']:6.2f} ms | AVC: {metrics['avc_mae_ms']:6.2f} ms | Mean: {metrics['mean_mae_ms']:6.2f} ms")
-    print(f"[RMSE] AVO: {metrics['avo_rmse_ms']:6.2f} ms | AVC: {metrics['avc_rmse_ms']:6.2f} ms | Mean: {metrics['mean_rmse_ms']:6.2f} ms")
-    print(f"[R²]   AVO: {metrics['avo_r2']:6.3f}    | AVC: {metrics['avc_r2']:6.3f}    | Mean: {metrics['mean_r2']:6.3f}")
-    print(f"[MedAE]AVO: {metrics['avo_medae_ms']:6.2f} ms | AVC: {metrics['avc_medae_ms']:6.2f} ms | Mean: {metrics['mean_medae_ms']:6.2f} ms")
-    print(f"[MAX]  AVO: {metrics['avo_max_err_ms']:6.2f} ms | AVC: {metrics['avc_max_err_ms']:6.2f} ms | Mean: {metrics['mean_max_err_ms']:6.2f} ms")
-    print(f"[BIAS] AVO: {metrics['avo_bias_ms']:6.2f} ms | AVC: {metrics['avc_bias_ms']:6.2f} ms | Mean: {metrics['mean_bias_ms']:6.2f} ms")
-    print(f"[<10ms]AVO: {metrics['avo_acc_10ms_%']:6.1f} %  | AVC: {metrics['avc_acc_10ms_%']:6.1f} %  | Mean: {metrics['mean_acc_10ms_%']:6.1f} %")
-    print(f"[<20ms]AVO: {metrics['avo_acc_20ms_%']:6.1f} %  | AVC: {metrics['avc_acc_20ms_%']:6.1f} %  | Mean: {metrics['mean_acc_20ms_%']:6.1f} %")
+    print(f"[MAE]  AVO: {test_metrics['avo_mae_ms']:6.2f} ms | AVC: {test_metrics['avc_mae_ms']:6.2f} ms | Mean: {test_metrics['mean_mae_ms']:6.2f} ms")
+    print(f"[RMSE] AVO: {test_metrics['avo_rmse_ms']:6.2f} ms | AVC: {test_metrics['avc_rmse_ms']:6.2f} ms | Mean: {test_metrics['mean_rmse_ms']:6.2f} ms")
+    print(f"[R²]   AVO: {test_metrics['avo_r2']:6.3f}    | AVC: {test_metrics['avc_r2']:6.3f}    | Mean: {test_metrics['mean_r2']:6.3f}")
+    print(f"[MedAE]AVO: {test_metrics['avo_medae_ms']:6.2f} ms | AVC: {test_metrics['avc_medae_ms']:6.2f} ms | Mean: {test_metrics['mean_medae_ms']:6.2f} ms")
+    print(f"[MAX]  AVO: {test_metrics['avo_max_err_ms']:6.2f} ms | AVC: {test_metrics['avc_max_err_ms']:6.2f} ms | Mean: {test_metrics['mean_max_err_ms']:6.2f} ms")
+    print(f"[BIAS] AVO: {test_metrics['avo_bias_ms']:6.2f} ms | AVC: {test_metrics['avc_bias_ms']:6.2f} ms | Mean: {test_metrics['mean_bias_ms']:6.2f} ms")
+    print(f"[<10ms]AVO: {test_metrics['avo_acc_10ms_%']:6.1f} %  | AVC: {test_metrics['avc_acc_10ms_%']:6.1f} %  | Mean: {test_metrics['mean_acc_10ms_%']:6.1f} %")
+    print(f"[<20ms]AVO: {test_metrics['avo_acc_20ms_%']:6.1f} %  | AVC: {test_metrics['avc_acc_20ms_%']:6.1f} %  | Mean: {test_metrics['mean_acc_20ms_%']:6.1f} %")
     print("="*45)
 
 
